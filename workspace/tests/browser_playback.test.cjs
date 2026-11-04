@@ -188,6 +188,33 @@ async function run() {
     assert.ok(audio.sources.every(source => source.stopped), "interruption must stop scheduled sources");
   });
 
+  await check("ignored speech does not stop queued assistant audio and both sources finish", async () => {
+    const { api } = harness();
+    const audio = new FakeAudioContext();
+    const socket = new FakeWebSocket();
+    api.setAudio(audio, socket);
+    const turn = "00112233445566778899aabbccddeeff";
+    await api.handleServerMessage(makePacket(turn, 0, 24000));
+    const first = audio.sources.find(source => source.when !== undefined);
+    assert.ok(first, "the first assistant audio source must start");
+    audio.finishNext();
+    assert.ok(first.ended, "the first source must reach its natural completion callback");
+
+    await api.handleServerMessage(JSON.stringify({ type: "speech_ignored", turn_id: turn }));
+    await api.handleServerMessage(makePacket(turn, 1, 24000));
+    const second = audio.sources.filter(source => source.when !== undefined)[1];
+    assert.ok(second, "the response tail must start after ignored speech");
+    assert.equal(second.stopped, undefined, "ignored speech must not stop the assistant's audio source");
+    audio.finishNext();
+    assert.ok(second.ended, "the response tail must reach its natural completion callback");
+
+    await api.handleServerMessage(JSON.stringify({ type: "turn_complete", turn_id: turn }));
+    assert.ok(socket.sent.map(message => {
+      try { return JSON.parse(message); } catch (_) { return null; }
+    }).some(message => message?.type === "playback_finished" && message.turn_id === turn),
+    "the browser must report playback completion after both sources finish");
+  });
+
   await check("WebSocket closure immediately stops scheduled playback", async () => {
     const { api } = harness();
     const audio = new FakeAudioContext();

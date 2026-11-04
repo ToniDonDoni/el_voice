@@ -1012,7 +1012,7 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                         f"ws://127.0.0.1:{listener.getsockname()[1]}/ws/voice", close_timeout=0.1
                     )
                     await client.send(json.dumps({
-                        "type": "start", "sample_rate": 16000, "interrupt_enabled": False,
+                        "type": "start", "sample_rate": 16000,
                     }))
                     started, _ = await receive_event(client, "session_started")
 

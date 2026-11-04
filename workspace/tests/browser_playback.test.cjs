@@ -264,22 +264,49 @@ async function run() {
       "the interrupt checkbox must be visible and checked by default");
     assert.match(html, /<label[^>]*for="interrupt-toggle"[^>]*>Interrupt assistant when I speak<\/label>/,
       "the preference must have an accessible visible label");
+    assert.match(html, /When off, speech during an active reply is ignored/,
+      "the control must explain that speech during an active reply is ignored when disabled");
     const { api, elements } = harness();
     await api.connectSocket();
-    const ws = FakeWebSocket.instances.at(-1);
-    const start = JSON.parse(ws.sent[0]);
+    let ws = FakeWebSocket.instances.at(-1);
+    let start = JSON.parse(ws.sent[0]);
     assert.equal(start.interrupt_enabled, true,
       "new sessions must send the default-on interrupt preference");
     const toggle = elements.get("#interrupt-toggle");
     assert.ok(toggle.listeners.has("change"), "the visible checkbox must have a change handler");
+
+    await api.stopSession(false);
     toggle.checked = false;
+    await api.connectSocket();
+    ws = FakeWebSocket.instances.at(-1);
+    start = JSON.parse(ws.sent[0]);
+    assert.equal(start.interrupt_enabled, false,
+      "a disabled preference selected before session start must be sent to the service");
+
     toggle.listeners.get("change")({ currentTarget: toggle });
-    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "interrupt_setting", enabled: false },
-      "turning interruption off must update the active socket");
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "interrupt_setting", enabled: false });
     toggle.checked = true;
     toggle.listeners.get("change")({ currentTarget: toggle });
     assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "interrupt_setting", enabled: true },
       "turning interruption on must update the active socket");
+
+    toggle.checked = false;
+    toggle.listeners.get("change")({ currentTarget: toggle });
+    api.setSessionWanted(true);
+    const disconnectedSocket = ws;
+    disconnectedSocket.close();
+    const reconnect = await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 1500;
+      const poll = () => {
+        const candidate = FakeWebSocket.instances.at(-1);
+        if (candidate !== disconnectedSocket && candidate?.sent.length) return resolve(candidate);
+        if (Date.now() >= deadline) return reject(new Error("socket did not reconnect"));
+        setTimeout(poll, 10);
+      };
+      poll();
+    });
+    assert.equal(JSON.parse(reconnect.sent[0]).interrupt_enabled, false,
+      "a reconnect must preserve the current unchecked preference");
     await api.stopSession(false);
   });
 

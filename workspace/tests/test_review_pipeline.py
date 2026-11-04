@@ -905,6 +905,163 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interrupt_toggle_preserves_active_reply_when_off_and_interrupts_when_on(self):
+        import uvicorn
+        import websockets
+
+        class VAD:
+            def __init__(self):
+                self.index = 0
+
+            def accept(self, _samples):
+                index = self.index
+                self.index += 1
+                if index % 2 == 0:
+                    return "start", None, 0.99
+                return "end", np.zeros(16000, dtype=np.float32), 0.01
+
+        class Runtime:
+            def __init__(self, mode):
+                self.mode = mode
+                self.status = {"ready": True, "stage": "ready", "mode": mode}
+                self.config = {"audio": {"max_buffered_audio_ms": 2000}, "speech": {}}
+                self.metrics = []
+                self.transcription_count = 0
+
+            async def initialize(self):
+                pass
+
+            def status_snapshot(self):
+                return {"ready": True, "stage": "ready", "mode": self.mode}
+
+            def new_vad(self):
+                return VAD()
+
+            def transcribe(self, _audio, cancel_event=None):
+                self.transcription_count += 1
+                return f"question {self.transcription_count}"
+
+            def llm_stream(self, text, _cancel, _history):
+                yield f"The complete answer to {text}."
+
+            def synthesize(self, _text, cancel_event=None):
+                return b"\x01\x00" * 960, 24000
+
+        async def receive_event(client, expected):
+            async with asyncio.timeout(3):
+                while True:
+                    message = await client.recv()
+                    if isinstance(message, bytes):
+                        turn_hex = message[4:20].hex()
+                        sequence = int.from_bytes(message[20:24], "big")
+                        await client.send(json.dumps({
+                            "type": "playback_started", "turn_id": turn_hex,
+                        }))
+                        await client.send(json.dumps({
+                            "type": "playback_queue", "turn_id": turn_hex,
+                            "sequence": sequence, "consumed_ms": 0, "buffered_ms": 40,
+                        }))
+                        continue
+                    event = json.loads(message)
+                    if event.get("type") == expected or (
+                        isinstance(expected, set) and event.get("type") in expected
+                    ):
+                        return event
+
+        for mode in ("local", "remote"):
+            with self.subTest(mode=mode):
+                runtime = Runtime(mode)
+                original_runtime, original_boot, original_active = app.runtime, app.boot_task, app.active_session
+                app.runtime, app.boot_task, app.active_session = runtime, None, None
+                listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                listener.bind(("127.0.0.1", 0))
+                listener.listen()
+                listener.setblocking(False)
+                server = uvicorn.Server(uvicorn.Config(app.app, log_level="critical", lifespan="on"))
+                server_task = asyncio.create_task(server.serve(sockets=[listener]))
+                client = None
+                try:
+                    async with asyncio.timeout(3):
+                        while not server.started:
+                            await asyncio.sleep(0.01)
+                    client = await websockets.connect(
+                        f"ws://127.0.0.1:{listener.getsockname()[1]}/ws/voice", close_timeout=0.1
+                    )
+                    await client.send(json.dumps({
+                        "type": "start", "sample_rate": 16000, "interrupt_enabled": False,
+                    }))
+                    started = await receive_event(client, "session_started")
+
+                    # Complete the first answer but keep simulated browser playback active.
+                    await client.send(b"\x00\x00" * 512)
+                    await client.send(b"\x00\x00" * 512)
+                    first = await receive_event(client, "turn_complete")
+                    session = app.active_session
+                    original_turn = session.turns[first["turn_id"]]
+                    async with asyncio.timeout(1):
+                        while not original_turn.playback_started:
+                            await asyncio.sleep(0.005)
+                    self.assertTrue(original_turn.playback_started)
+
+                    # With interruption disabled, a noisy/user utterance is ignored.
+                    await client.send(b"\x00\x00" * 512)
+                    ignored = await receive_event(client, {"speech_ignored", "interrupt"})
+                    self.assertEqual(ignored["type"], "speech_ignored",
+                                     "disabled interruption must not stop current playback")
+                    await client.send(b"\x00\x00" * 512)
+                    self.assertEqual(ignored["turn_id"], original_turn.turn_id)
+                    self.assertIs(session.current_turn, original_turn)
+                    self.assertFalse(original_turn.cancel_event.is_set())
+                    self.assertEqual(runtime.transcription_count, 1,
+                                     "ignored speech must not create a competing transcription")
+                    self.assertIs(started.get("interrupt_enabled"), False,
+                                  "session acknowledgement must expose the selected setting")
+
+                    # The original response reaches browser playback completion, then listening resumes.
+                    await client.send(json.dumps({
+                        "type": "playback_finished", "turn_id": original_turn.turn_id,
+                    }))
+                    await receive_event(client, "listening")
+
+                    # A new utterance after the reply is accepted normally.
+                    await client.send(b"\x00\x00" * 512)
+                    await client.send(b"\x00\x00" * 512)
+                    second = await receive_event(client, "turn_complete")
+                    self.assertNotEqual(second["turn_id"], original_turn.turn_id)
+                    self.assertEqual(runtime.transcription_count, 2)
+
+                    # Turn barge-in back on while playback is active and prove replacement.
+                    await client.send(json.dumps({"type": "interrupt_setting", "enabled": True}))
+                    setting = await receive_event(client, "interrupt_setting")
+                    self.assertIs(setting.get("enabled"), True)
+                    previous_turn = app.active_session.turns[second["turn_id"]]
+                    await client.send(b"\x00\x00" * 512)
+                    interruption = await receive_event(client, "interrupt")
+                    self.assertEqual(interruption["turn_id"], previous_turn.turn_id)
+                    self.assertTrue(previous_turn.cancel_event.is_set())
+                    await client.send(b"\x00\x00" * 512)
+                    replacement = await receive_event(client, "turn_complete")
+                    self.assertNotEqual(replacement["turn_id"], previous_turn.turn_id)
+                    self.assertEqual(runtime.transcription_count, 3)
+                finally:
+                    if client is not None:
+                        try:
+                            await asyncio.wait_for(client.close(), timeout=0.5)
+                        except Exception:
+                            pass
+                    if app.active_session is not None:
+                        app.active_session.stopped = True
+                        for turn in app.active_session.turns.values():
+                            turn.cancel_event.set()
+                    server.should_exit = True
+                    try:
+                        await asyncio.wait_for(server_task, timeout=3)
+                    except Exception:
+                        server_task.cancel()
+                        await asyncio.gather(server_task, return_exceptions=True)
+                    app.runtime, app.boot_task, app.active_session = original_runtime, original_boot, original_active
+
     async def test_two_websocket_turns_pass_exact_prior_exchange_to_llm(self):
         import uvicorn
         import websockets

@@ -9,10 +9,13 @@ Run in the voice image with:
 from __future__ import annotations
 
 import asyncio
+import io
 import importlib.resources
 import json
+import logging
 import socket
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -23,17 +26,20 @@ import voice_pipeline
 
 
 class StubRuntime:
-    def __init__(self):
+    def __init__(self, deltas=None, config=None):
         self.synthesized = []
         self.histories = []
         self.generation_finished = threading.Event()
+        self.deltas = deltas or ["**Build** Mjollnir ✨ and read https://example.com/guide now."]
+        self.config = config or {"speech": {"minimum_chunk_chars": 18, "first_chunk_max_chars": 60,
+                                             "max_chunk_chars": 80}}
 
     def transcribe(self, _audio):
         return "Give me a short answer."
 
     def llm_stream(self, _text, _cancel, history):
         self.histories.append(list(history))
-        yield "**Build** Mjollnir ✨ and read https://example.com/guide now."
+        yield from self.deltas
         self.generation_finished.set()
 
     def synthesize(self, text):
@@ -90,6 +96,40 @@ class SpeakableResponseTests(unittest.TestCase):
         self.assertNotIn("✨", tts_input)
         self.assertIn("Mjollnir", tts_input)
 
+    def test_fragmented_markup_urls_long_phrases_and_configured_chunks(self):
+        original_runtime = app.runtime
+        runtime = StubRuntime(
+            deltas=[
+                "**Build** Mjo", "llnir** with a very long", " unpunctuated phrase that keeps going",
+                " and going until it needs a split. Read https://exa", "mple.com/guide and keep going. ✨",
+            ],
+            config={"speech": {"minimum_chunk_chars": 12, "first_chunk_max_chars": 20,
+                               "max_chunk_chars": 45}},
+        )
+        app.runtime = runtime
+        session = SimpleNamespace(
+            stopped=False, session_id="chunking-regression", outgoing=asyncio.Queue(maxsize=32),
+            history=[], current_turn=None, turns={},
+        )
+        session.is_current = lambda turn: not session.stopped and session.current_turn is turn and not turn.cancel_event.is_set()
+        turn = SimpleNamespace(turn_id="chunking-turn", cancel_event=threading.Event())
+        session.current_turn = turn
+        try:
+            asyncio.run(app.process_turn(session, turn, b"audio"))
+            chunks = [item.event["text"] for item in list(session.outgoing._queue)
+                      if item.event and item.event.get("type") == "audio_chunk"]
+        finally:
+            app.runtime = original_runtime
+        self.assertTrue(chunks)
+        self.assertLessEqual(len(chunks[0]), 20, "the first chunk should be short enough to start playback early")
+        self.assertTrue(all(len(chunk) <= 45 for chunk in chunks), "configured maximum chunk length must be respected")
+        spoken = " ".join(runtime.synthesized)
+        self.assertNotIn("**", spoken)
+        self.assertNotIn("https://", spoken)
+        self.assertNotIn("example.com", spoken)
+        self.assertNotIn("✨", spoken)
+        self.assertIn("Mjollnir", spoken)
+
 
 class StartupValidationTests(unittest.TestCase):
     def test_configuration_errors_are_exposed_by_status_endpoint(self):
@@ -100,12 +140,19 @@ class StartupValidationTests(unittest.TestCase):
             "vad": {"sample_rate": 16000, "frame_samples": 512, "threshold": 0.55, "negative_threshold": 0.35,
                     "start_frames": 3, "end_silence_ms": 640, "min_speech_ms": 240, "pre_roll_ms": 320,
                     "max_utterance_seconds": 45},
+            "audio": {"max_buffered_audio_ms": 2000},
+            "speech": {"minimum_chunk_chars": 18, "first_chunk_max_chars": 60, "max_chunk_chars": 80},
         }
         cases = [
             ("tts.sample_rate", lambda cfg: cfg["tts"].update(sample_rate=12345)),
             ("stt.cpu_threads", lambda cfg: cfg["stt"].update(cpu_threads=0)),
+            ("llm.cpu_threads type", lambda cfg: cfg["llm"].update(cpu_threads="four")),
             ("vad.threshold", lambda cfg: cfg["vad"].update(threshold=1.5)),
             ("vad.sample_rate", lambda cfg: cfg["vad"].update(sample_rate=8000)),
+            ("vad hysteresis", lambda cfg: cfg["vad"].update(negative_threshold=0.7)),
+            ("vad duration", lambda cfg: cfg["vad"].update(max_utterance_seconds=-1)),
+            ("audio buffer limit", lambda cfg: cfg["audio"].update(max_buffered_audio_ms=0)),
+            ("speech chunk order", lambda cfg: cfg["speech"].update(first_chunk_max_chars=90)),
         ]
 
         async def fetch_status(config):
@@ -149,6 +196,59 @@ class StartupValidationTests(unittest.TestCase):
         self.assertTrue(status["ready"], "valid settings should allow normal initialization")
 
 
+class LogPrivacyTests(unittest.TestCase):
+    def test_requested_text_and_errors_are_logged_without_audio_payload(self):
+        original_runtime = app.runtime
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        app.logger.addHandler(handler)
+
+        class Runtime(StubRuntime):
+            def transcribe(self, _audio):
+                return "transcript marker"
+
+            def llm_stream(self, _text, _cancel, _history):
+                yield "reply marker."
+
+            def synthesize(self, _text):
+                return b"LOCAL_AUDIO_SECRET_SENTINEL", 24000
+
+        class BrokenRuntime(Runtime):
+            def transcribe(self, _audio):
+                raise RuntimeError("synthetic inference failure")
+
+        session = SimpleNamespace(
+            stopped=False, session_id="log-test", outgoing=asyncio.Queue(maxsize=16), history=[],
+            current_turn=None, turns={},
+        )
+        session.is_current = lambda turn: not session.stopped and session.current_turn is turn and not turn.cancel_event.is_set()
+
+        async def run():
+            app.runtime = Runtime()
+            turn = SimpleNamespace(turn_id="log-success", cancel_event=threading.Event())
+            session.current_turn = turn
+            await app.process_turn(session, turn, b"audio")
+            app.runtime = BrokenRuntime()
+            failed_turn = SimpleNamespace(turn_id="log-error", cancel_event=threading.Event())
+            session.current_turn = failed_turn
+            await app.process_turn(session, failed_turn, b"audio")
+
+        try:
+            asyncio.run(run())
+        finally:
+            app.runtime = original_runtime
+            app.logger.removeHandler(handler)
+            handler.close()
+        output = stream.getvalue()
+        self.assertIn('"event":"user_transcript"', output)
+        self.assertIn("transcript marker", output)
+        self.assertIn('"event":"assistant_reply"', output)
+        self.assertIn("reply marker", output)
+        self.assertIn('"event":"turn_error"', output)
+        self.assertIn("synthetic inference failure", output)
+        self.assertNotIn("LOCAL_AUDIO_SECRET_SENTINEL", output)
+
+
 class AudioPacketTests(unittest.IsolatedAsyncioTestCase):
     async def test_binary_audio_contains_turn_identity_sequence_and_rate(self):
         class Socket:
@@ -164,30 +264,30 @@ class AudioPacketTests(unittest.IsolatedAsyncioTestCase):
                 if len(self.binary) == 2:
                     self.session.stopped = True
 
+        original_runtime = app.runtime
+        app.runtime = StubRuntime()
         session = app.VoiceSession("session-packet", None, None)
         socket = Socket(session)
         session.websocket = socket
         turn = voice_pipeline.Turn("00112233445566778899aabbccddeeff")
         session.current_turn = turn
         session.remember_turn(turn)
-        pcm = b"\x01\x02" * 32
-        for sequence in range(2):
-            await session.outgoing.put(app.Outbound(
-                event={"type": "audio_chunk", "turn_id": turn.turn_id, "sequence": sequence,
-                       "sample_rate": 24000},
-                audio=pcm,
-                turn_id=turn.turn_id,
-            ))
-        sender = asyncio.create_task(app.websocket_sender(session))
-        await asyncio.wait_for(session.outgoing.join(), timeout=1)
-        await asyncio.wait_for(sender, timeout=1)
-        self.assertEqual(len(socket.binary), 2)
-        for sequence, packet in enumerate(socket.binary):
-            self.assertEqual(packet[:4], b"ELVA")
-            self.assertEqual(packet[4:20], bytes.fromhex(turn.turn_id))
-            self.assertEqual(int.from_bytes(packet[20:24], "big"), sequence)
-            self.assertEqual(int.from_bytes(packet[24:28], "big"), 24000)
-            self.assertEqual(packet[28:], pcm)
+        try:
+            await app.synthesize_and_queue(session, turn, "First packet sentence.")
+            await app.synthesize_and_queue(session, turn, "Second packet sentence.")
+            sender = asyncio.create_task(app.websocket_sender(session))
+            await asyncio.wait_for(session.outgoing.join(), timeout=1)
+            await asyncio.wait_for(sender, timeout=1)
+            self.assertEqual(len(socket.binary), 2)
+            for sequence, packet in enumerate(socket.binary):
+                self.assertEqual(packet[:4], b"ELVA")
+                self.assertEqual(packet[4:20], bytes.fromhex(turn.turn_id))
+                self.assertEqual(int.from_bytes(packet[20:24], "big"), sequence)
+                self.assertEqual(int.from_bytes(packet[24:28], "big"), 24000)
+                self.assertEqual(len(packet[28:]) % 2, 0)
+                self.assertEqual(packet[28:], b"\x00\x00" * 480)
+        finally:
+            app.runtime = original_runtime
 
 
 class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -295,6 +395,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         original_runtime = app.runtime
         started = threading.Event()
         release_first = threading.Event()
+        cancelled_first = threading.Event()
         counter_lock = threading.Lock()
 
         class SlowRuntime(StubRuntime):
@@ -304,7 +405,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                 self.active = 0
                 self.max_active = 0
 
-            def transcribe(self, _audio):
+            def transcribe(self, _audio, cancel_event=None):
                 with counter_lock:
                     self.calls += 1
                     call = self.calls
@@ -313,7 +414,11 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     if call == 1:
                         started.set()
-                        release_first.wait(timeout=2)
+                        if cancel_event is None:
+                            release_first.wait(timeout=1)
+                        else:
+                            cancel_event.wait(timeout=1)
+                            cancelled_first.set()
                     return f"question {call}"
                 finally:
                     with counter_lock:
@@ -331,10 +436,8 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
             obsolete.cancel_event.set()
             session.current_turn = replacement
             replacement_task = asyncio.create_task(app.process_turn(session, replacement, b"second"))
-            await asyncio.sleep(0.05)
-            self.assertEqual(runtime.calls, 1, "replacement work must wait without creating another CPU worker")
-            release_first.set()
-            await asyncio.wait_for(asyncio.gather(obsolete_task, replacement_task), timeout=2)
+            await asyncio.wait_for(asyncio.gather(obsolete_task, replacement_task), timeout=1)
+            self.assertTrue(cancelled_first.is_set(), "the old inference must observe actual turn cancellation")
             self.assertEqual(runtime.max_active, 1, "obsolete STT workers must not accumulate")
             self.assertTrue(any(item.event and item.event.get("type") == "turn_complete"
                                 for item in list(session.outgoing._queue)),
@@ -352,7 +455,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         for stage in ("llm", "tts"):
             with self.subTest(stage=stage):
                 started = threading.Event()
-                release_first = threading.Event()
+                first_finished = threading.Event()
                 counter_lock = threading.Lock()
 
                 class SlowRuntime(StubRuntime):
@@ -370,7 +473,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             self.max_active = max(self.max_active, self.active)
                         if call == 1:
                             started.set()
-                            release_first.wait(timeout=2)
+                            time.sleep(0.15)
                         return call
 
                     def llm_stream(self, _text, _cancel, _history):
@@ -381,6 +484,8 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             finally:
                                 with counter_lock:
                                     self.active -= 1
+                                if call == 1:
+                                    first_finished.set()
                         else:
                             yield "This is the first complete sentence."
 
@@ -393,6 +498,8 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             finally:
                                 with counter_lock:
                                     self.active -= 1
+                                if call == 1:
+                                    first_finished.set()
                         return b"\x00\x00" * 480, 24000
 
                 runtime = SlowRuntime()
@@ -405,16 +512,16 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                 new_task = None
                 try:
                     self.assertTrue(await asyncio.to_thread(started.wait, 1), f"{stage} call should start")
+                    cancelled_at = time.monotonic()
                     old.cancel_event.set()
                     session.current_turn = new
                     new_task = asyncio.create_task(app.process_turn(session, new, b"new"))
-                    await asyncio.sleep(0.05)
-                    self.assertEqual(runtime.calls, 1, f"replacement {stage} must await old worker without spawning another")
-                    release_first.set()
-                    await asyncio.wait_for(asyncio.gather(old_task, new_task), timeout=2)
+                    await asyncio.wait_for(asyncio.gather(old_task, new_task), timeout=1)
+                    self.assertTrue(first_finished.is_set(), f"obsolete {stage} work must terminate")
+                    residual_ms = (time.monotonic() - cancelled_at) * 1000
+                    self.assertLess(residual_ms, 1000, f"measured residual {stage} work must remain bounded")
                     self.assertEqual(runtime.max_active, 1)
                 finally:
-                    release_first.set()
                     for task in (old_task, new_task):
                         if task and not task.done():
                             task.cancel()

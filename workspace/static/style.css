@@ -57,6 +57,22 @@ html, body {
   color: var(--muted);
   white-space: nowrap;
 }
+.mode-badge {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mode-badge.local { color: var(--accent); border-color: #2b5c55; }
+.mode-badge.remote { color: var(--warning); border-color: #6b5426; }
+.mode-badge.unknown { color: var(--danger); border-color: #542a25; }
+
 .pill.listening { color: #0b1a16; background: var(--accent); border-color: transparent; }
 .pill.processing { color: #1c1405; background: var(--warning); border-color: transparent; }
 .pill.speaking { color: #04131a; background: #7cc7ff; border-color: transparent; }
@@ -144,6 +160,17 @@ main {
 }
 .notice strong { color: var(--warning); }
 
+.remote-disclosure {
+  color: var(--text);
+  font-size: 13.5px;
+  margin: 12px 0 0;
+  border-left: 3px solid var(--warning);
+  background: #1f1a0d;
+  border-radius: 0 10px 10px 0;
+  padding: 10px 12px;
+}
+.remote-disclosure strong { color: var(--warning); }
+
 .messages {
   display: flex;
   flex-direction: column;
@@ -178,6 +205,35 @@ main {
   text-transform: uppercase;
   color: var(--muted);
   margin-bottom: 3px;
+}
+
+.message .sources {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px dashed var(--line);
+  white-space: normal;
+}
+.message .sources-title {
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.message .sources a {
+  color: var(--accent);
+  font-size: 13px;
+  text-decoration: underline;
+  word-break: break-word;
+}
+.message .tool-note {
+  display: block;
+  margin-top: 6px;
+  color: var(--warning);
+  font-size: 12.5px;
+  white-space: normal;
 }
 
 .hint { color: var(--muted); font-size: 14px; }

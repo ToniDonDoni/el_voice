@@ -21,7 +21,7 @@ import struct
 import threading
 import time
 
-from .context import ConversationHistory, build_messages
+from .llm_client import LlmClientError
 from .tts import SpeakableChunker
 from .turnids import TurnIdSource
 from .vad import FRAME_BYTES, SpeechSegmenter
@@ -32,7 +32,6 @@ logger = logging.getLogger("elvoice.pipeline")
 
 AUDIO_MAGIC = b"EVA1"
 AUDIO_HEADER = struct.Struct("<4sIIHH")  # magic, turn_id, sequence, sample_rate, reserved
-LLM_TOKEN_TIMEOUT = 30.0
 
 
 class Turn:
@@ -106,7 +105,7 @@ class VoiceSession:
     """One browser microphone session with one active turn at a time."""
 
     def __init__(self, session_id: str, cfg: dict, engines, metrics: Metrics,
-                 send_json, send_audio, next_turn_id=None):
+                 send_json, send_audio, next_turn_id=None, llm=None):
         self.session_id = session_id
         self._cfg = cfg
         self._engines = engines
@@ -122,20 +121,23 @@ class VoiceSession:
         self._output_rate = int(cfg["audio"]["output_sample_rate"])
         self._next_turn_id = next_turn_id or _DEFAULT_TURN_IDS.next
         self._turn_ids: dict[int, int] = {}
-        conversation_cfg = cfg.get("conversation", {})
-        self._conversation = ConversationHistory(int(conversation_cfg.get("history_turns", 4)))
-        self._max_prompt_chars = int(conversation_cfg.get("max_prompt_chars", 4000))
+        self._llm = llm
         self.last_prompt: dict = {}
 
     # -- session lifecycle -------------------------------------------------
     async def start(self) -> dict:
         logger.info("session %s: start requested", self.session_id)
         await self._engines.wait_ready()
+        if self._llm is None:
+            raise EngineError("the internal LLM service client is not configured")
+        try:
+            await self._llm.start()
+        except LlmClientError as exc:
+            raise EngineError(str(exc)) from exc
         self._engines.vad.reset_states()
         self._segmenter.reset()
         self._pending.clear()
         self._turn_ids.clear()
-        self._conversation.reset()
         self.last_prompt = {}
         self._state = "listening"
         logger.info("session %s: ready", self.session_id)
@@ -158,7 +160,6 @@ class VoiceSession:
 
     async def stop(self) -> None:
         logger.info("session %s: stop requested", self.session_id)
-        self._conversation.reset()
         self.last_prompt = {}
         self._turn_ids.clear()
         self._closed = True
@@ -171,6 +172,11 @@ class VoiceSession:
             try:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: B014 - teardown must not raise
+                pass
+        if self._llm is not None:
+            try:
+                await self._llm.close()
+            except Exception:  # noqa: BLE001 - teardown must not raise
                 pass
         await self._set_state("idle")
 
@@ -253,6 +259,17 @@ class VoiceSession:
             await self._generate(turn, text)
         except asyncio.CancelledError:
             raise
+        except LlmClientError as exc:
+            turn.cancel.set()
+            logger.warning("turn=%s: llm failed (%s)", turn.id, exc.code)
+            if not turn.cancelled:
+                await self._send_json({
+                    "type": "error",
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                })
+                await self._finish_turn(turn)
         except Exception as exc:  # noqa: BLE001 - report to the browser, keep the session
             turn.cancel.set()
             logger.exception("turn=%s: failed (%s)", turn.id, type(exc).__name__)
@@ -260,21 +277,22 @@ class VoiceSession:
                 await self._send_json({
                     "type": "error",
                     "code": "turn_failed",
-                    "message": "The local voice pipeline could not finish this turn.",
+                    "message": "The voice pipeline could not finish this turn.",
                     "retryable": True,
                 })
                 await self._finish_turn(turn)
 
     async def _generate(self, turn: Turn, text: str) -> None:
-        logger.info("turn=%s: llm start prompt_chars=%d", turn.id, len(text))
-        llm_cfg = self._cfg["llm"]
+        """Stream one turn through the internal LLM service.
+
+        The voice pipeline sends only the current final utterance. The service
+        owns the bounded conversation history and the system prompt, and returns
+        text deltas plus optional tool/source events.
+        """
+        if self._llm is None:
+            raise EngineError("the internal LLM service client is not configured")
+        logger.info("turn=%s: llm request chars=%d", turn.id, len(text))
         tts_cfg = self._cfg["tts"]
-        messages, self.last_prompt = build_messages(
-            llm_cfg["system_prompt"],
-            self._conversation.as_list(),
-            text,
-            self._max_prompt_chars,
-        )
         chunker = SpeakableChunker(
             int(tts_cfg["min_chunk_chars"]),
             int(tts_cfg["soft_chunk_chars"]),
@@ -282,42 +300,75 @@ class VoiceSession:
             int(tts_cfg.get("first_chunk_chars", 50)),
         )
         sequence = 0
-        iterator = self._engines.stream_chat(messages, turn.cancel)
+        stream = self._llm.generate(turn.id, text)
         try:
-            while True:
-                try:
-                    delta = await asyncio.wait_for(iterator.__anext__(), timeout=LLM_TOKEN_TIMEOUT)
-                except StopAsyncIteration:
-                    break
+            async for event in stream:
                 if turn.cancelled:
                     return
-                if turn.first_token_ts is None:
-                    turn.first_token_ts = time.perf_counter()
-                    logger.info(
-                        "turn=%s: first token after %.0f ms",
-                        turn.id, (turn.first_token_ts - turn.stt_done_ts) * 1000.0,
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("type")
+                if kind == "start":
+                    stats = event.get("prompt")
+                    if isinstance(stats, dict):
+                        self.last_prompt = dict(stats)
+                elif kind == "delta":
+                    delta = event.get("text") or ""
+                    if not isinstance(delta, str) or not delta:
+                        continue
+                    if turn.first_token_ts is None:
+                        turn.first_token_ts = time.perf_counter()
+                        logger.info(
+                            "turn=%s: first token after %.0f ms",
+                            turn.id, (turn.first_token_ts - turn.stt_done_ts) * 1000.0,
+                        )
+                    turn.answer_text += delta
+                    await self._send_json({
+                        "type": "assistant_text", "turn_id": turn.id, "delta": delta,
+                    })
+                    for chunk in chunker.feed(delta):
+                        if turn.cancelled:
+                            return
+                        sequence = await self._speak(turn, chunk, sequence)
+                elif kind == "sources":
+                    sources = event.get("sources")
+                    if isinstance(sources, list):
+                        await self._send_json({
+                            "type": "assistant_sources",
+                            "turn_id": turn.id,
+                            "sources": sources,
+                        })
+                elif kind == "tool":
+                    await self._send_json({
+                        "type": "assistant_tool",
+                        "turn_id": turn.id,
+                        "name": event.get("name", ""),
+                        "query": event.get("query", ""),
+                    })
+                elif kind == "cancelled":
+                    return
+                elif kind == "done":
+                    break
+                elif kind == "error":
+                    raise LlmClientError(
+                        event.get("message") or "The LLM service reported an error.",
+                        code=event.get("code", "llm_error"),
+                        retryable=bool(event.get("retryable", True)),
                     )
-                turn.answer_text += delta
-                await self._send_json({"type": "assistant_text", "turn_id": turn.id, "delta": delta})
-                for chunk in chunker.feed(delta):
-                    if turn.cancelled:
-                        return
-                    sequence = await self._speak(turn, chunk, sequence)
             for chunk in chunker.flush():
                 if turn.cancelled:
                     return
                 sequence = await self._speak(turn, chunk, sequence)
         finally:
-            close = getattr(iterator, "aclose", None)
+            close = getattr(stream, "aclose", None)
             if callable(close):
                 try:
                     await close()
-                except Exception:  # noqa: BLE001 - closing a cancelled generator is best effort
+                except Exception:  # noqa: BLE001 - closing a cancelled stream is best effort
                     pass
 
         if turn.cancelled:
             return
-        self._conversation.add_exchange(text, turn.answer_text)
         await self._send_json({"type": "turn_end", "turn_id": turn.id})
         if turn.first_audio_ts is not None and turn.speech_end_ts is not None:
             logger.info(
@@ -363,6 +414,11 @@ class VoiceSession:
         turn.cancelled = True
         turn.state = "cancelled"
         turn.cancel.set()
+        if self._llm is not None:
+            try:
+                await self._llm.cancel(turn.id)
+            except Exception:  # noqa: BLE001 - cancellation is best effort
+                pass
         task = turn.task
         if task is not None and not task.done():
             task.cancel()

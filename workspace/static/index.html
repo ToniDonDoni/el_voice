@@ -9,7 +9,8 @@
 <body>
   <header class="topbar">
     <div class="brand">EL<span>·</span>VOICE</div>
-    <div class="tagline">Local Dota voice assistant · runs entirely on this Mac</div>
+    <div class="tagline">Dota voice assistant · local or remote generation</div>
+    <div id="mode-badge" class="mode-badge unknown">mode: —</div>
     <div id="state-pill" class="pill idle">idle</div>
   </header>
 
@@ -32,6 +33,12 @@
         but it is best effort. Speaker playback is not supported in this MVP, because
         the assistant could hear itself and interrupt.
       </p>
+      <p id="remote-disclosure" class="remote-disclosure" hidden>
+        <strong>Remote mode.</strong> Transcribed text and any web-search queries are
+        sent to the configured OpenCode Go provider and DuckDuckGo. Microphone audio
+        stays on this Mac. Search results appear as clickable links and are never read
+        aloud.
+      </p>
     </section>
 
     <section class="card transcript-card">
@@ -42,7 +49,7 @@
     </section>
 
     <section class="card status-card">
-      <h2>Local pipeline</h2>
+      <h2>Pipeline</h2>
       <dl id="components" class="components"></dl>
       <dl class="stats">
         <div><dt>Echo cancellation</dt><dd id="echo">—</dd></div>
@@ -53,8 +60,9 @@
       </dl>
       <p id="error" class="error" hidden></p>
       <p class="privacy">
-        Models load from the local model directory. Audio and transcripts are kept only in
-        memory for the duration of the session and are never written to disk or logs.
+        Speech models load from the local model directory. In Local mode all generation
+        stays offline. In Remote mode only text and search queries leave this Mac; audio
+        and transcripts are kept only in memory and are never written to disk or logs.
       </p>
     </section>
   </main>

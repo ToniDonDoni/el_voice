@@ -24,6 +24,7 @@ from starlette.websockets import WebSocketState
 
 from elvoice import settings
 from elvoice.engines import EngineError, EngineManager
+from elvoice.llm_client import LlmClient, fetch_status as fetch_llm_status
 from elvoice.pipeline import Metrics, VoiceSession
 
 SOURCE_DIR = Path(__file__).resolve().parent
@@ -62,6 +63,7 @@ class AppState:
             self.settings_error = f"{type(exc).__name__}: {exc}"
             logger.error("settings error: %s", self.settings_error)
         self.manager = EngineManager(self.cfg, settings.model_root()) if self.cfg else None
+        self.llm_url = settings.llm_service_url()
         self.metrics = Metrics()
         self.active: dict | None = None
 
@@ -104,18 +106,53 @@ async def add_security_headers(request, call_next):
     return response
 
 
-def _status_payload() -> dict:
+async def _llm_status() -> dict:
+    try:
+        return await fetch_llm_status(STATE.llm_url, timeout=2.0)
+    except Exception as exc:  # noqa: BLE001 - readiness must stay available
+        return {
+            "mode": "unknown",
+            "ready": False,
+            "error": f"The internal LLM service is not reachable ({type(exc).__name__}).",
+        }
+
+
+async def _status_payload() -> dict:
     manager = STATE.manager
     active = STATE.active
+    llm = await _llm_status()
+    llm_ready = bool(llm.get("ready"))
+    components = manager.status() if manager is not None else {
+        "ready": False,
+        "error": STATE.settings_error,
+        "components": {},
+    }
+    components = {
+        **components,
+        "components": {
+            **dict(components.get("components") or {}),
+            "llm": {
+                "status": "ready" if llm_ready else ("error" if llm.get("error") else "pending"),
+                "detail": llm.get("error") or "",
+                "mode": llm.get("mode"),
+            },
+        },
+    }
     session_state = active["session"].state if active is not None else "idle"
     payload = {
         "stage": "voice",
         "settings_error": STATE.settings_error,
-        "pipeline_ready": bool(manager is not None and manager.is_ready),
-        "components": manager.status() if manager is not None else {
-            "ready": False,
-            "error": STATE.settings_error,
-            "components": {},
+        "pipeline_ready": bool(
+            manager is not None and manager.is_ready and llm_ready
+        ),
+        "components": components,
+        "llm": {
+            "mode": llm.get("mode", "unknown"),
+            "ready": llm_ready,
+            "error": llm.get("error"),
+            "context": llm.get("context"),
+            "search": llm.get("search"),
+            "limits": llm.get("limits"),
         },
         "session": {
             "active": active is not None,
@@ -159,7 +196,7 @@ async def healthz() -> JSONResponse:
 
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
-    return JSONResponse(_status_payload(), headers=SECURITY_HEADERS)
+    return JSONResponse(await _status_payload(), headers=SECURITY_HEADERS)
 
 
 @app.get("/")
@@ -243,13 +280,23 @@ async def websocket_session(websocket: WebSocket) -> None:
                 if not STATE.manager.is_ready:
                     await send_json({
                         "type": "error", "code": "not_ready",
-                        "message": "Local models are still loading.",
+                        "message": "Local speech models are still loading.",
+                        "retryable": True,
+                    })
+                    continue
+                llm = await _llm_status()
+                if not llm.get("ready"):
+                    await send_json({
+                        "type": "error", "code": "llm_not_ready",
+                        "message": llm.get("error")
+                        or "The internal LLM service is still loading.",
                         "retryable": True,
                     })
                     continue
                 session = VoiceSession(
                     str(uuid.uuid4()), STATE.cfg, STATE.manager, STATE.metrics,
                     send_json, send_audio,
+                    llm=LlmClient(STATE.llm_url),
                 )
                 try:
                     ready = await session.start()
@@ -258,7 +305,8 @@ async def websocket_session(websocket: WebSocket) -> None:
                     session = None
                     await send_json({
                         "type": "error", "code": "not_ready",
-                        "message": "Local models are not ready.", "retryable": True,
+                        "message": str(exc) or "The voice pipeline is not ready.",
+                        "retryable": True,
                     })
                     continue
                 STATE.active = {"session": session, "socket": websocket}
@@ -294,7 +342,7 @@ async def websocket_session(websocket: WebSocket) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="EL Voice local browser conversation service")
+    parser = argparse.ArgumentParser(description="EL Voice browser conversation service")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()

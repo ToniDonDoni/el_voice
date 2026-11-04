@@ -24,6 +24,8 @@ const MAX_RECONNECT_ATTEMPTS = 6;
 
 const dom = {
   pill: document.getElementById('state-pill'),
+  modeBadge: document.getElementById('mode-badge'),
+  remoteDisclosure: document.getElementById('remote-disclosure'),
   start: document.getElementById('start'),
   stop: document.getElementById('stop'),
   volume: document.getElementById('volume'),
@@ -76,10 +78,17 @@ const ui = {
   meetComponents(status) {
     const components = (status && status.components && status.components.components) || {};
     const names = ['vad', 'stt', 'llm', 'tts'];
+    const llmMode = (status && status.llm && status.llm.mode) || 'unknown';
+    const labels = {
+      vad: 'Streaming VAD',
+      stt: 'Whisper STT',
+      llm: `LLM service (${llmMode})`,
+      tts: 'Silero TTS',
+    };
     dom.components.replaceChildren(...names.map((name) => {
       const row = document.createElement('div');
       const term = document.createElement('dt');
-      term.textContent = { vad: 'Streaming VAD', stt: 'Whisper STT', llm: 'Gemma LLM', tts: 'Silero TTS' }[name];
+      term.textContent = labels[name];
       const value = document.createElement('dd');
       const state = (components[name] || {}).status || 'pending';
       value.textContent = state;
@@ -90,6 +99,17 @@ const ui = {
   },
   renderStatus(status) {
     ui.meetComponents(status);
+    const llm = (status && status.llm) || {};
+    const mode = llm.mode || 'unknown';
+    if (dom.modeBadge) {
+      dom.modeBadge.textContent = mode === 'local' ? 'Local mode'
+        : mode === 'remote' ? 'Remote mode'
+          : 'Mode unknown';
+      dom.modeBadge.className = 'mode-badge ' + mode;
+    }
+    if (dom.remoteDisclosure) {
+      dom.remoteDisclosure.hidden = mode !== 'remote';
+    }
     const metrics = status.metrics || {};
     const response = metrics.response_latency_ms || { count: 0 };
     dom.latency.textContent = response.count
@@ -105,6 +125,8 @@ const ui = {
       : 'no measurements yet';
     if (status.settings_error) {
       ui.error('Configuration error: ' + status.settings_error);
+    } else if (llm.error) {
+      ui.error('LLM service: ' + llm.error);
     }
   },
 };
@@ -375,6 +397,7 @@ class VoiceClient {
   _handleJson(message) {
     switch (message.type) {
       case 'ready':
+        this.turns.clear();
         this._flushAll();
         this.latestTurnId = null;
         this.turnEnded = null;
@@ -395,6 +418,12 @@ class VoiceClient {
         break;
       case 'assistant_text':
         this._assistantText(message.turn_id, message.delta);
+        break;
+      case 'assistant_tool':
+        this._assistantTool(message.turn_id, message.name, message.query);
+        break;
+      case 'assistant_sources':
+        this._assistantSources(message.turn_id, message.sources);
         break;
       case 'flush':
         this._flushTurn(message.turn_id);
@@ -643,7 +672,7 @@ class VoiceClient {
   _turn(turnId) {
     let turn = this.turns.get(turnId);
     if (!turn) {
-      turn = { user: null, assistant: null };
+      turn = { user: null, assistant: null, searching: null, sources: null };
       this.turns.set(turnId, turn);
     }
     return turn;
@@ -665,6 +694,57 @@ class VoiceClient {
       turn.assistant = addMessage('assistant', '');
     }
     turn.assistant.textContent += delta;
+    dom.messages.scrollTop = dom.messages.scrollHeight;
+  }
+
+  _assistantTool(turnId, name, query) {
+    const turn = this._turn(turnId);
+    if (!turn.assistant) {
+      turn.assistant = addMessage('assistant', '');
+    }
+    if (!turn.searching) {
+      const note = document.createElement('span');
+      note.className = 'tool-note';
+      turn.assistant.parentElement.append(note);
+      turn.searching = note;
+    }
+    const label = name === 'web_search' ? 'Searching the web' : `Calling ${name}`;
+    turn.searching.textContent = `${label} for “${query}”…`;
+    dom.messages.scrollTop = dom.messages.scrollHeight;
+  }
+
+  _assistantSources(turnId, sources) {
+    if (!Array.isArray(sources) || sources.length === 0) return;
+    const turn = this._turn(turnId);
+    if (!turn.assistant) {
+      turn.assistant = addMessage('assistant', '');
+    }
+    if (turn.searching) {
+      turn.searching.remove();
+      turn.searching = null;
+    }
+    if (turn.sources) turn.sources.remove();
+    const box = document.createElement('div');
+    box.className = 'sources';
+    const title = document.createElement('span');
+    title.className = 'sources-title';
+    title.textContent = 'Sources';
+    box.append(title);
+    let links = 0;
+    for (const source of sources) {
+      const url = source && typeof source.url === 'string' ? source.url : '';
+      if (!/^https?:\/\//i.test(url)) continue;
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = (source && source.title) || url;
+      box.append(link);
+      links += 1;
+    }
+    if (links === 0) return;
+    turn.assistant.parentElement.append(box);
+    turn.sources = box;
     dom.messages.scrollTop = dom.messages.scrollHeight;
   }
 

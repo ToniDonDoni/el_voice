@@ -9,6 +9,8 @@ from pathlib import Path
 DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parent.parent / "settings.json"
 MODEL_ROOT_ENV = "EL_VOICE_MODELS"
 DATA_ROOT_ENV = "EL_VOICE_DATA"
+LLM_SERVICE_ENV = "EL_VOICE_LLM_URL"
+DEFAULT_LLM_SERVICE_URL = "ws://llm:8100"
 
 
 def model_root() -> Path:
@@ -19,6 +21,11 @@ def model_root() -> Path:
 def data_root() -> Path:
     """Writable runtime directory (cache only, no audio or transcripts)."""
     return Path(os.environ.get(DATA_ROOT_ENV, "/data"))
+
+
+def llm_service_url() -> str:
+    """Internal WebSocket URL of the LLM service (never a provider URL)."""
+    return os.environ.get(LLM_SERVICE_ENV, DEFAULT_LLM_SERVICE_URL).rstrip("/")
 
 
 def _number(block: dict, key: str, where: str, minimum: float | None = None,

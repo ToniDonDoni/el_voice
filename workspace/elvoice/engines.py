@@ -1,4 +1,9 @@
-"""Model lifecycle, readiness reporting and local CPU inference.
+"""Speech-model lifecycle, readiness reporting and local CPU inference.
+
+The voice container owns VAD, Whisper STT and Silero TTS only. Language-model
+access, conversation history and remote/search orchestration live in the
+internal LLM service, so this module never loads Gemma and never contacts a
+remote provider.
 
 Everything runs on CPU inside the container. Model files are verified against
 their download receipts before an engine is allowed to open them. Initialization
@@ -23,7 +28,7 @@ from . import models
 
 logger = logging.getLogger("elvoice.engines")
 
-COMPONENTS = ("vad", "stt", "llm", "tts")
+COMPONENTS = ("vad", "stt", "tts")
 
 
 class EngineError(RuntimeError):
@@ -46,11 +51,9 @@ class EngineManager:
         self._thread: threading.Thread | None = None
         self._vad = None
         self._stt = None
-        self._llm = None
         self._tts_model = None
         self._torch = None
         self._np = None
-        self._llm_lock = threading.Lock()
         self._stt_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._tts_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
@@ -133,7 +136,6 @@ class EngineManager:
         self._load_vad()
         self._load_tts()
         self._load_stt()
-        self._load_llm()
 
         self._stt_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="elvoice-stt"
@@ -185,22 +187,6 @@ class EngineManager:
         self._mark("stt", "ready")
         logger.info("model stt ready in %.1f s", time.perf_counter() - started)
 
-    def _load_llm(self) -> None:
-        from llama_cpp import Llama
-
-        llm_cfg = self._cfg["llm"]
-        started = time.perf_counter()
-        path = models.verify_asset(self._root, llm_cfg["model"])
-        self._llm = Llama(
-            model_path=str(path),
-            n_ctx=int(llm_cfg["n_ctx"]),
-            n_batch=int(llm_cfg["n_batch"]),
-            n_threads=int(llm_cfg["n_threads"]),
-            verbose=False,
-        )
-        self._mark("llm", "ready")
-        logger.info("model llm ready in %.1f s", time.perf_counter() - started)
-
     def _warm_up(self) -> None:
         """Run each engine once so lazy init is not paid on the first real turn."""
         started = time.perf_counter()
@@ -213,15 +199,6 @@ class EngineManager:
                 beam_size=1,
                 vad_filter=False,
                 without_timestamps=True,
-            )
-            # Same system prompt as a real turn to warm prompt evaluation.
-            self._llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": self._cfg["llm"]["system_prompt"]},
-                    {"role": "user", "content": "Привет"},
-                ],
-                max_tokens=1,
-                temperature=0.0,
             )
         except Exception as exc:  # noqa: BLE001 - warm-up must not block readiness
             logger.warning("engine warm-up skipped: %s", type(exc).__name__)
@@ -279,68 +256,3 @@ class EngineManager:
             (time.perf_counter() - started) * 1000.0, len(array) / 24000.0,
         )
         return (array * 32767.0).astype(np.int16).tobytes()
-
-    async def stream_chat(self, messages: list[dict], cancel: threading.Event):
-        """Yield response text deltas from the local model.
-
-        Generation runs on its own thread because llama.cpp generation is
-        blocking CPU work. The cancellation check happens between tokens, so a
-        barge-in stops inference after at most one token; the underlying engine
-        call for that token is never scheduled again. This bounds the active
-        inference rather than only cancelling an awaiting coroutine.
-        """
-        if self._llm is None:
-            raise EngineError("language model is not ready")
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-        llm_cfg = self._cfg["llm"]
-
-        def _deliver(item) -> None:
-            try:
-                loop.call_soon_threadsafe(queue.put_nowait, item)
-            except RuntimeError:
-                pass
-
-        def _worker() -> None:
-            try:
-                with self._llm_lock:
-                    if cancel.is_set():
-                        return
-                    generation = self._llm.create_chat_completion(
-                        messages=messages,
-                        stream=True,
-                        max_tokens=int(llm_cfg["max_tokens"]),
-                        temperature=float(llm_cfg["temperature"]),
-                        top_p=float(llm_cfg["top_p"]),
-                        repeat_penalty=float(llm_cfg["repeat_penalty"]),
-                    )
-                    first_token = True
-                    try:
-                        for chunk in generation:
-                            if cancel.is_set():
-                                break
-                            choice = chunk["choices"][0]
-                            delta = choice.get("delta") or {}
-                            text = delta.get("content") or ""
-                            if text:
-                                if first_token:
-                                    first_token = False
-                                    logger.info("llm: first token delivered")
-                                _deliver(("token", text))
-                    finally:
-                        close = getattr(generation, "close", None)
-                        if callable(close):
-                            close()
-            except Exception as exc:  # noqa: BLE001 - surfaced to the turn
-                _deliver(("error", f"{type(exc).__name__}: {exc}"))
-            finally:
-                _deliver(("end", None))
-
-        threading.Thread(target=_worker, name="elvoice-llm", daemon=True).start()
-        while True:
-            kind, value = await queue.get()
-            if kind == "end":
-                return
-            if kind == "error":
-                raise EngineError(value)
-            yield value

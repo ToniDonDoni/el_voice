@@ -1,10 +1,11 @@
 """End-to-end local pipeline check for EL Voice.
 
-Starts the real FastAPI application in-process, synthesises Russian test
-utterances with the configured Silero voice, streams them over the real
-WebSocket protocol as 16 kHz PCM frames, and checks one complete turn plus a
-barge-in during playback. This exercises the streaming VAD, Whisper, Gemma and
-Silero TTS in the same process layout as the container.
+Starts the real internal LLM service (local Gemma backend) and the real voice
+FastAPI application in-process, synthesises Russian test utterances with the
+configured Silero voice, streams them over the real WebSocket protocol as 16 kHz
+PCM frames, and checks one complete turn plus a barge-in during playback. This
+exercises the streaming VAD, Whisper, the LLM-service boundary, Gemma and Silero
+TTS in the same process layout as the two Compose services.
 
 Run inside the voice container:
     python /workspace/tests/selftest.py --models /models
@@ -29,8 +30,10 @@ import urllib.request
 from pathlib import Path
 
 SOURCE_DIR = Path(__file__).resolve().parents[1]
-if str(SOURCE_DIR) not in sys.path:
-    sys.path.insert(0, str(SOURCE_DIR))
+REPO_ROOT = SOURCE_DIR.parent
+for _path in (str(SOURCE_DIR), str(REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 HEADER = 16
 
@@ -57,6 +60,19 @@ def wait_http_ready(url: str, timeout: float = 240.0) -> dict:
             last_error = str(exc)
             time.sleep(0.5)
     raise SystemExit(f"service did not become available: {last_error}")
+
+
+def wait_llm_ready(base_url: str, timeout: float = 240.0) -> dict:
+    deadline = time.monotonic() + timeout
+    status: dict = {}
+    while time.monotonic() < deadline:
+        status = wait_http_ready(base_url + "/status", timeout=5)
+        if status.get("ready"):
+            return status
+        if status.get("error"):
+            raise SystemExit(f"LLM service failed to start: {status['error']}")
+        time.sleep(0.5)
+    raise SystemExit(f"LLM service did not become ready: {json.dumps(status)[:500]}")
 
 
 def wait_pipeline_ready(base_url: str, timeout: float = 240.0) -> dict:
@@ -357,6 +373,17 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
     record("process still healthy after the session", status.get("components", {}).get("ready", False))
     record("no content persistence configured", not status.get("config", {}).get("audio_persisted", True))
 
+    llm = status.get("llm") or {}
+    llm_component = ((status.get("components") or {}).get("components") or {}).get("llm") or {}
+    record("LLM service mode is reported as local", llm.get("mode") == "local",
+           f"mode={llm.get('mode')}")
+    record("LLM service readiness is exposed through the voice boundary",
+           llm.get("ready") is True and llm_component.get("status") == "ready",
+           f"ready={llm.get('ready')} component={llm_component.get('status')}")
+    record("local mode has no remote search enabled",
+           (llm.get("search") or {}).get("enabled") is False,
+           repr(llm.get("search")))
+
     failed = [name for name, ok, _ in results if not ok]
     print(flush=True)
     if failed:
@@ -370,17 +397,43 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="EL Voice end-to-end local check")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770)
+    parser.add_argument("--llm-port", type=int, default=8771)
     parser.add_argument("--models", default=os.environ.get("EL_VOICE_MODELS", "/models"))
     args = parser.parse_args()
 
     models_root = Path(args.models).resolve()
     os.environ.setdefault("EL_VOICE_MODELS", str(models_root))
+    # The voice app always routes generation through the internal LLM service.
+    os.environ["EL_VOICE_LLM_URL"] = f"ws://{args.host}:{args.llm_port}"
+    os.environ.setdefault("EL_VOICE_WORKSPACE", str(SOURCE_DIR.resolve()))
+    os.environ.setdefault("EL_VOICE_LLM_MODE", "local")
 
     from elvoice import settings as settings_module
 
     cfg = settings_module.load_settings()
 
     import uvicorn
+
+    from llm_service.server import create_app as create_llm_app
+
+    llm_server = uvicorn.Server(uvicorn.Config(
+        create_llm_app(), host=args.host, port=args.llm_port,
+        log_level="warning", access_log=False, lifespan="on",
+    ))
+    llm_thread = threading.Thread(target=llm_server.run, daemon=True)
+    llm_thread.start()
+    try:
+        wait_http_ready(f"http://{args.host}:{args.llm_port}/healthz")
+        llm_status = wait_llm_ready(f"http://{args.host}:{args.llm_port}")
+        print(
+            f"LLM service ready: mode={llm_status.get('mode')} "
+            f"search={llm_status.get('search')}",
+            flush=True,
+        )
+    except BaseException:
+        llm_server.should_exit = True
+        llm_thread.join(timeout=10)
+        raise
 
     import app as app_module
 
@@ -397,6 +450,8 @@ def main() -> int:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        llm_server.should_exit = True
+        llm_thread.join(timeout=10)
 
 
 if __name__ == "__main__":

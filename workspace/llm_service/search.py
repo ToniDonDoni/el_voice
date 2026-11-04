@@ -159,16 +159,17 @@ class WebSearch:
 
 
 def make_langchain_search_tool(search: WebSearch, observer=None):
-    from langchain.tools import tool
+    from langchain.tools import ToolRuntime, tool
 
     @tool("web_search")
-    async def web_search(query: str) -> str:
+    async def web_search(query: str, runtime: ToolRuntime) -> str:
         """Search public web pages for current information. Input one concise search query."""
         invocation_id = uuid.uuid4().hex
+        call_id = runtime.tool_call_id
         started_at = time.monotonic()
         if observer:
             observer("tool_call_started", tool_name="web_search", tool_invocation_id=invocation_id,
-                     query=query[:240], backend=getattr(search, "backend", "configured"))
+                     tool_call_id=call_id, backend=getattr(search, "backend", "configured"))
         try:
             payload = await search.tool_payload(query)
             try:
@@ -177,7 +178,8 @@ def make_langchain_search_tool(search: WebSearch, observer=None):
                 result_count = 0
             if observer:
                 observer("tool_call_completed", tool_name="web_search",
-                         tool_invocation_id=invocation_id, result_count=result_count,
+                         tool_invocation_id=invocation_id, tool_call_id=call_id,
+                         result_count=result_count,
                          duration_ms=round((time.monotonic() - started_at) * 1000, 1))
             return payload
         except Exception as exc:
@@ -185,7 +187,7 @@ def make_langchain_search_tool(search: WebSearch, observer=None):
                 code = getattr(exc, "code", None)
                 error_code = str(code if isinstance(code, str) else type(exc).__name__)[:100]
                 observer("tool_call_failed", tool_name="web_search",
-                         tool_invocation_id=invocation_id,
+                         tool_invocation_id=invocation_id, tool_call_id=call_id,
                          error_code=error_code,
                          duration_ms=round((time.monotonic() - started_at) * 1000, 1))
             raise

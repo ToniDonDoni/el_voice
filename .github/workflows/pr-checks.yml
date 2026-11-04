@@ -29,7 +29,7 @@ jobs:
           python -m pip install \
             'fastapi==0.162.0' 'httpx==0.28.1' 'numpy==2.5.4' \
             'langchain==1.4.8' 'langchain-openai==1.7.3' \
-            'ddgs==9.16.1' 'tiktoken==0.14.0' 'websockets==17.4'
+            'ddgs==9.16.1' 'tiktoken==0.14.0' 'websockets==17.4' 'uvicorn==0.54.0'
           python -m pip check
       - name: Syntax check
         run: python -m compileall -q workspace
@@ -44,7 +44,16 @@ jobs:
             test_llm_client \
             test_llm_service_stream_cleanup \
             test_remote_provider_request_headers \
-            test_remote_voice
+            test_remote_voice \
+            test_review_pipeline.SpeakableResponseTests \
+            test_review_pipeline.LogPrivacyTests \
+            test_review_pipeline.AudioPacketTests \
+            test_review_pipeline.TurnRegressionTests \
+            test_review_pipeline.RuntimeInferenceLockTests \
+            test_review_pipeline.WebSocketCleanupTests \
+            test_review_pipeline.WebSocketConversationTests \
+            test_review_pipeline.BrowserAudioBackpressureTests \
+            test_review_pipeline.PlaybackAcknowledgementTests
 
   browser-contracts:
     name: Browser JavaScript contracts

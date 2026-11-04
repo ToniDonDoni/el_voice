@@ -336,7 +336,7 @@ class OpenCodeLangChainProvider:
             async for event in stream_agent(
                 agent, messages, cancelled,
                 max_tool_calls=self.tool_iterations,
-                max_snippet_chars=getattr(self.search, "max_snippet_chars", 500),
+                max_snippet_chars=getattr(getattr(self, "search", None), "max_snippet_chars", 500),
                 observe=self._observe_tool_event,
             ):
                 if cancelled.is_set():

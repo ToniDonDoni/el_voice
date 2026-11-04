@@ -60,6 +60,10 @@ def mocked_checks() -> None:
           all(len(source["snippet"]) <= 50 for source in sources)
           and "\n" not in sources[0]["snippet"],
           repr([source["snippet"][:20] for source in sources]))
+    numeric = [safe_url("http://127.1/x"), safe_url("http://2130706433/x"),
+               safe_url("http://0x7f000001/x")]
+    check("numeric private address forms are rejected",
+          all(candidate is None for candidate in numeric), repr(numeric))
     check("loopback/private/metadata/file/credential URLs are rejected",
           safe_url("http://127.0.0.1/x") is None
           and safe_url("http://[::1]/x") is None

@@ -32,7 +32,13 @@ def _pair(history: list[dict]) -> list[list[dict]]:
 def build_messages(system_prompt: str, history: list[dict], user_text: str,
                    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS) -> tuple[list[dict], dict]:
     """Build the model prompt and content-free statistics for one turn."""
-    budget = max(0, int(max_prompt_chars) - len(system_prompt) - len(user_text))
+    limit = max(1, int(max_prompt_chars))
+    system_trimmed = system_prompt[:limit]
+    available = max(0, limit - len(system_trimmed))
+    user_trimmed = user_text
+    if len(user_trimmed) > available:
+        user_trimmed = user_trimmed[:available]
+    budget = available - len(user_trimmed)
     selected: list[list[dict]] = []
     for pair in reversed(_pair(history)):
         cost = sum(len(item.get("content", "")) for item in pair)
@@ -41,13 +47,14 @@ def build_messages(system_prompt: str, history: list[dict], user_text: str,
         selected.insert(0, pair)
         budget -= cost
 
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": system_trimmed}]
     for pair in selected:
         messages.extend({"role": item["role"], "content": item["content"]} for item in pair)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": user_trimmed})
     stats = {
         "history_turns": len(selected),
         "chars": sum(len(item["content"]) for item in messages),
+        "truncated": (system_trimmed != system_prompt or user_trimmed != user_text),
     }
     return messages, stats
 

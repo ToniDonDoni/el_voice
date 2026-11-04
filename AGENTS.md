@@ -10,7 +10,8 @@
   internet access. Preserve it.
 - Remote Voice is the SPEC-002 extension: generation may go to the configured OpenCode Go
   provider and web search to DuckDuckGo, but only through the internal LLM service. Only
-  final text, bounded context and search queries leave the Mac; microphone audio stays local.
+  the remote service sends final text, bounded prior dialogue and search result
+  titles/URLs/snippets to the provider; microphone audio stays local.
 - Keep source code and project documentation in English.
 - Work on a dedicated branch. Preserve unrelated edits.
 

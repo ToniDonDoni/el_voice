@@ -167,6 +167,37 @@ async def first_search_scenario(config) -> None:
           backend.status()["provider_verified"] is True, repr(backend.status()))
 
 
+def split_tool_chunks(query: str = "Dota 2 patch 7.41") -> list:
+    payload = json.dumps({"query": query})
+    first, second = payload[:12], payload[12:]
+    return [
+        AIMessageChunk(content="", tool_call_chunks=[{
+            "name": "web_search", "args": first, "id": "call_split", "index": 0,
+        }]),
+        AIMessageChunk(content="", tool_call_chunks=[{
+            "name": None, "args": second, "id": None, "index": 0,
+        }]),
+    ]
+
+
+async def split_tool_args_scenario(config) -> None:
+    model = FakeChatModel([split_tool_chunks(), final_chunks("Готово.")])
+    searches: list[str] = []
+
+    async def fake_search(query: str, **kwargs):
+        searches.append(query)
+        return [{"title": "ok", "url": "https://example.com/ok", "snippet": "ok"}]
+
+    backend = RemoteBackend(config, chat_model=model, search=fake_search)
+    await backend.start()
+    events = await collect(backend, [{"role": "user", "content": "Что нового?"}])
+    check("partial tool-call argument chunks are assembled into one call",
+          searches == ["Dota 2 patch 7.41"], repr(searches))
+    check("split tool-call assembly still emits sources and a final answer",
+          any(event["type"] == "sources" for event in events)
+          and joined_deltas(events) == "Готово.", repr([e["type"] for e in events]))
+
+
 async def empty_search_scenario(config) -> None:
     model = FakeChatModel([[tool_chunk("no results query")], final_chunks("Не нашёл.")])
 
@@ -288,6 +319,7 @@ async def main() -> int:
         max_search_results=2,
         search_snippet_chars=120,
     )
+    await split_tool_args_scenario(config)
     await first_search_scenario(config)
     await empty_search_scenario(config)
     await max_iterations_scenario(config)

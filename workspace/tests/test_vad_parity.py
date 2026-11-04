@@ -56,7 +56,7 @@ def main() -> int:
         # does not install it; the parity check is fully exercised in the
         # development environment (.venv has silero-vad==5.1.2).
         print(f"SKIP: official silero-vad wrapper unavailable ({type(exc).__name__}: {exc})")
-        print("RESULT: PASS (parity skipped; install silero-vad==5.1.2 to run it)")
+        print("RESULT: SKIP (parity not run; silero-vad is a development-only test dependency)")
         return 0
 
     our = SileroVad(str(MODEL), sample_rate=16000, threads=1)

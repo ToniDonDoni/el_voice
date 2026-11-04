@@ -435,7 +435,7 @@ class VoiceClient {
       case 'empty_turn':
         break;
       case 'error':
-        if (this.readyWaiter && (message.code === 'not_ready' || message.code === 'busy')) {
+        if (this.readyWaiter && ['not_ready', 'busy', 'llm_not_ready', 'not_ready_llm'].includes(message.code)) {
           this.readyWaiter.resolve(message);
         } else {
           ui.error(message.message || 'The local pipeline reported an error.');

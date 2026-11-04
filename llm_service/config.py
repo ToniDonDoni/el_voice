@@ -12,6 +12,7 @@ are reported by the public ``/status`` endpoint.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -66,6 +67,17 @@ def import_voice_settings():
     from elvoice import settings as voice_settings  # noqa: PLC0415 - path first
 
     return voice_settings
+
+
+def _validated_base_url(value: str) -> str:
+    """Reject non-HTTPS provider endpoints so credentials never travel in clear text."""
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ConfigError(
+            "OPENCODE_GO_BASE_URL must be an HTTPS URL; refusing a non-HTTPS provider "
+            "endpoint so credentials are never sent in clear text."
+        )
+    return value
 
 
 def _text(value: str | None, default: str) -> str:
@@ -180,7 +192,9 @@ def load_config() -> ServiceConfig:
     models_root = Path(os.environ.get(MODELS_ENV, "/models"))
 
     remote = RemoteProvider(
-        base_url=_text(os.environ.get(BASE_URL_ENV), DEFAULT_BASE_URL).rstrip("/"),
+        base_url=_validated_base_url(
+            _text(os.environ.get(BASE_URL_ENV), DEFAULT_BASE_URL).rstrip("/")
+        ),
         model=_text(os.environ.get(MODEL_ENV), DEFAULT_MODEL),
         api_key=(os.environ.get(KEY_ENV) or "").strip(),
         session_id=_text(os.environ.get(SESSION_ENV), f"el-voice-{uuid.uuid4().hex}"),

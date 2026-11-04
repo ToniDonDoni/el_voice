@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import socket
 import logging
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -60,7 +61,11 @@ def _is_public_host(hostname: str) -> bool:
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        return True
+        # Numeric IPv4 forms such as 127.1, 2130706433 or 0x7f000001.
+        try:
+            address = ipaddress.ip_address(socket.inet_aton(host))
+        except OSError:
+            return True
     return not (
         address.is_private
         or address.is_loopback

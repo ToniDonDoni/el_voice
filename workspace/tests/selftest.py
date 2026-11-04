@@ -13,7 +13,8 @@ Run inside the voice container:
 Run in a development environment with the downloaded models:
     EL_VOICE_MODELS=/path/to/models python workspace/tests/selftest.py
 
-The check never writes audio or transcripts anywhere; it only reports results.
+The check does not persist audio or transcripts; developer output prints only
+lengths, status and timings, never transcript text.
 """
 
 from __future__ import annotations
@@ -239,7 +240,7 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
             elif kind == "error":
                 record("turn one completed without an error", False, json.loads(message)["message"])
                 break
-        record("Russian utterance transcribed locally", bool(user_text), (user_text or "")[:80])
+        record("Russian utterance transcribed locally", bool(user_text), f"{len(user_text or '')} chars")
         record("assistant produced audio for turn one", turn_one_audio > 0, f"{turn_one_audio} chunks")
         if first_audio_at is not None:
             record("first audio arrived after speech end", True,
@@ -297,7 +298,7 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
                        json.loads(message)["message"])
                 break
         record("new turn transcribed after barge-in", bool(turn_three_text),
-               (turn_three_text or "")[:80])
+               f"{len(turn_three_text or '')} chars")
         record("new turn produced audio", turn_three_audio > 0, f"{turn_three_audio} chunks")
         record("no stale audio from the interrupted turn after flush", stale_after_flush == 0,
                f"{stale_after_flush} late chunks")

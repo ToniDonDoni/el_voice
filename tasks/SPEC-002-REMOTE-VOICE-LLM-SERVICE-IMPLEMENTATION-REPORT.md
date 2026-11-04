@@ -55,7 +55,7 @@ All commands run from `/work/el_voice`.
 | `node --check workspace/static/app.js` (+ capture-worklet, playback, resampler) | exit 0 |
 | `EL_VOICE_MODELS=$PWD/models python workspace/tests/test_contracts.py` | `RESULT: PASS` |
 | `EL_VOICE_MODELS=$PWD/models python workspace/tests/test_pipeline_context.py` | `RESULT: PASS` (9 checks) |
-| `EL_VOICE_MODELS=$PWD/models python workspace/tests/test_vad_parity.py` | `RESULT: PASS` |
+| `EL_VOICE_MODELS=$PWD/models python workspace/tests/test_vad_parity.py` | `RESULT: PASS` in the development venv (official silero-vad 5.1.2); `RESULT: SKIP` in the image because the package is a dev-only test dependency |
 | `EL_VOICE_MODELS=$PWD/models python tools/test_tts_integrity.py` | `OK` (5 tests) |
 | `for test in workspace/tests/*.test.mjs; do node "$test"; done` | all three `RESULT: PASS` |
 | `docker compose -f compose.yaml -f compose.local.yaml config --quiet` | exit 0 |
@@ -122,7 +122,8 @@ latency was not measurable.
 | **Interruption and recovery** | **Partial** | Server cancel stops the backend iterator; local Gemma checks the token between tokens; tests cover cancel-mid-stream then next turn, error recovery, disconnect and reset. Remote provider-side cancellation is explicitly unverified. Browser stop/flush behavior is covered by node tests but not a real browser. |
 | **Local regression** | **Partial / local pass** | The 21-check local end-to-end run passes with no remote key and no search (`llm.search.enabled=false`). The local LLM service runs on the internal `private` network. External-access-unavailable behavior was not tested in Docker; no remote/search fallback exists in code. |
 | **Network and credentials** | **Partial** | Only the remote `llm` service joins the egress network and receives the key. Key is not committed; errors/status are redacted and tested; logs do not contain prompts/answers. Docker runtime network isolation and an actual provider key were not tested. |
-| **Data and tool boundaries** | **Partial** | UI has a mode badge, remote disclosure and clickable sources; sources are never spoken; search accepts only a short query, never a URL/shell command; private/loopback/metadata result URLs are filtered; no tracing or persistent agent memory. Browser rendering was not observed. The SPEC-001 privacy-log conflict remains as previously reported. |
+| **Data and tool boundaries** | **Partial** | UI has a mode badge, remote disclosure and clickable sources; sources are never spoken; search accepts only a short query, never a URL/shell command; private/loopback/metadata result URLs are filtered; no tracing or persistent agent memory. Browser rendering was not observed. Developer test output prints only transcript lengths and status, never transcript text; no
+audio or transcript content is persisted or written to runtime logs. |
 
 ### P1 — Verification and reproducibility
 

@@ -9,8 +9,9 @@ modes:
   downloads are used.
 - **Remote Voice** — the same local audio capture, STT and TTS, but generation goes through
   LangChain to the configured OpenCode Go model (`deepseek-v4.1-flash` by default) and a
-  real DuckDuckGo `web_search` tool. Only final text, bounded conversation context and
-  search queries leave the Mac; microphone audio never does.
+  real DuckDuckGo `web_search` tool. Remote mode sends the bounded prior dialogue and
+  search result titles, URLs and snippets back to the provider; microphone audio never
+  leaves the Mac.
 
 Both modes call the same internal LLM service over one streaming/cancellation contract, so
 the voice application never loads Gemma and never contacts OpenCode Go directly. The
@@ -162,7 +163,8 @@ docker compose -f compose.yaml -f compose.local.yaml down
 
 Open **http://localhost:8765** in a browser and press **Start conversation**. The page shows
 a **Local mode** or **Remote mode** badge. Remote mode also shows the disclosure that
-transcribed text and search queries leave the Mac. `/api/status` returns
+transcribed text, bounded prior dialogue and search result titles/URLs/snippets leave the
+Mac in Remote mode. `/api/status` returns
 `pipeline_ready: true` only when the local speech models and the LLM service are both ready.
 
 Microphone capture is resampled to exactly 16 kHz inside the AudioWorklet with a
@@ -569,7 +571,8 @@ docker compose -f compose.yaml -f compose.local.yaml exec voice \
 
 The check exercises VAD → Whisper → the LLM-service boundary → Gemma → Silero → tagged audio,
 a barge-in during playback, no stale audio after the flush, a follow-up turn, reconnect/turn
-ids, content-free status, and local-mode reporting. It writes no audio or transcripts. A
+ids, content-free status, and local-mode reporting. It does not persist audio or transcripts
+and prints only lengths and status. A
 successful run in the development sandbox prints `RESULT: PASS (21 checks)`.
 
 ## Measured baseline in the development sandbox

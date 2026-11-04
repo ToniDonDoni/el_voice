@@ -1,1 +1,2 @@
 - [ ] [Implement local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
+- [ ] [Address SPEC-001 implementation review and complete acceptance evidence](SPEC-001-LOCAL-VOICE-CONVERSATION-REVIEW.md).

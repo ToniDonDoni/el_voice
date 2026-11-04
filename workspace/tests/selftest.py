@@ -211,6 +211,20 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
         ready_payload = json.loads(ready)
         record("session ready after models initialized", True,
                f"vad={ready_payload['vad']['threshold']}")
+        status_default = await asyncio.to_thread(
+            fetch_json, f"http://127.0.0.1:{port}/api/status")
+        record("interruption is enabled by default",
+               (status_default.get("session") or {}).get("barge_in") is True,
+               repr((status_default.get("session") or {}).get("barge_in")))
+        await harness.send_json({"type": "config", "barge_in": False})
+        await asyncio.sleep(0.1)
+        status_off = await asyncio.to_thread(
+            fetch_json, f"http://127.0.0.1:{port}/api/status")
+        record("interruption can be disabled from the UI",
+               (status_off.get("session") or {}).get("barge_in") is False,
+               repr((status_off.get("session") or {}).get("barge_in")))
+        await harness.send_json({"type": "config", "barge_in": True})
+        await asyncio.sleep(0.1)
 
         # --- one complete turn -------------------------------------------
         record_started = time.perf_counter()

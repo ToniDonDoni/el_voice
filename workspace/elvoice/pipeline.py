@@ -124,6 +124,8 @@ class VoiceSession:
         self._turn_ids: dict[int, int] = {}
         self._llm = llm
         self.last_prompt: dict = {}
+        self._barge_in_enabled = True
+        self._ignored_sequences: set[int] = set()
 
     # -- session lifecycle -------------------------------------------------
     async def start(self) -> dict:
@@ -139,7 +141,9 @@ class VoiceSession:
         self._segmenter.reset()
         self._pending.clear()
         self._turn_ids.clear()
+        self._ignored_sequences.clear()
         self.last_prompt = {}
+        self._barge_in_enabled = True
         self._state = "listening"
         logger.info("session %s: ready", self.session_id)
         vad_cfg = self._cfg["vad"]
@@ -209,8 +213,32 @@ class VoiceSession:
                 logger.warning("VAD inference failed: %s", type(exc).__name__)
             return 0.0
 
+    def set_barge_in(self, enabled: bool) -> None:
+        """Enable or disable voice interruption of the current answer."""
+        self._barge_in_enabled = bool(enabled)
+        logger.info("session %s: barge_in=%s", self.session_id, self._barge_in_enabled)
+
+    @property
+    def barge_in_enabled(self) -> bool:
+        return self._barge_in_enabled
+
+    def _assistant_turn_active(self) -> bool:
+        turn = self._turn
+        if turn is None or turn.cancelled:
+            return False
+        if turn.state in ("processing", "generating", "speaking"):
+            return True
+        return (turn.task is not None and not turn.task.done()) or turn.audio_sent
+
     async def _on_onset(self, sequence: int) -> None:
         onset_ts = time.perf_counter()
+        if not self._barge_in_enabled and self._assistant_turn_active():
+            # In noisy environments the user turns interruption off: speech
+            # during an answer is captured and discarded so the answer runs to
+            # the end, and the next quiet utterance starts a normal turn.
+            self._ignored_sequences.add(sequence)
+            logger.info("turn-sequence %s: ignored because barge-in is disabled", sequence)
+            return
         turn_id = self._next_turn_id()
         self._turn_ids[sequence] = turn_id
         previous = self._turn.state if self._turn is not None else "none"
@@ -223,6 +251,10 @@ class VoiceSession:
         await self._set_state("listening")
 
     async def _on_utterance_end(self, event: dict) -> None:
+        if event["turn_id"] in self._ignored_sequences:
+            self._ignored_sequences.discard(event["turn_id"])
+            logger.info("turn-sequence %s: discarded (barge-in disabled)", event["turn_id"])
+            return
         turn = self._turn
         expected = self._turn_ids.pop(event["turn_id"], None)
         if turn is None or expected is None or turn.id != expected or turn.cancelled:

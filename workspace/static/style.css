@@ -272,3 +272,14 @@ footer {
   padding: 0 20px 30px;
 }
 footer code { color: #8fb3c4; }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  user-select: none;
+  cursor: pointer;
+}
+.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }

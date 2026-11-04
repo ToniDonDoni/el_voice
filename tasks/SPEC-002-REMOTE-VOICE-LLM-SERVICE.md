@@ -97,6 +97,8 @@ provides a search API or that hosted search is built into this model.
 - [ ] **Interruption and recovery:** Speech interrupts remote generation, tool
   execution, and playback. Close/cancel in-flight local HTTP streams and pending
   work, flush buffers, reject stale turn results, and accept the next utterance.
+  The user-controlled interruption toggle from SPEC-001 applies in both modes: when it is
+  disabled, speech during generation must not cancel the answer and the answer must finish.
   Distinguish local cancellation from any unverified provider-side cancellation.
   Disconnect, stop/restart, timeout, rate-limit, and provider failure recover without
   stuck sessions, duplicate answers, or unbounded retries and queues.

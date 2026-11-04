@@ -31,6 +31,7 @@ const dom = {
   volume: document.getElementById('volume'),
   volumeValue: document.getElementById('volume-value'),
   mute: document.getElementById('mute'),
+  bargeIn: document.getElementById('barge-in'),
   level: document.getElementById('level'),
   messages: document.getElementById('messages'),
   components: document.getElementById('components'),
@@ -199,7 +200,9 @@ class VoiceClient {
     this.audioChunks = 0;
     this.volume = 1;
     this.muted = false;
+    this.bargeIn = true;
     this._loadVolumePreferences();
+    this._loadBargeInPreference();
   }
 
   // -- public controls ----------------------------------------------------
@@ -554,6 +557,36 @@ class VoiceClient {
     this._updateAudioState();
   }
 
+  _loadBargeInPreference() {
+    try {
+      const stored = window.localStorage.getItem('elvoice-barge-in');
+      if (stored !== null) {
+        this.bargeIn = stored !== '0';
+      }
+    } catch (error) {
+      /* storage may be unavailable; interruption stays enabled by default */
+    }
+    if (dom.bargeIn) {
+      dom.bargeIn.checked = this.bargeIn;
+    }
+  }
+
+  _sendConfig() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ type: 'config', barge_in: this.bargeIn }));
+  }
+
+  _setBargeIn(enabled) {
+    this.bargeIn = Boolean(enabled);
+    try {
+      window.localStorage.setItem('elvoice-barge-in', this.bargeIn ? '1' : '0');
+    } catch (error) {
+      /* storage may be unavailable */
+    }
+    if (dom.bargeIn) dom.bargeIn.checked = this.bargeIn;
+    this._sendConfig();
+  }
+
   _loadVolumePreferences() {
     try {
       const storedVolume = window.localStorage.getItem('elvoice-volume');
@@ -775,6 +808,7 @@ dom.start.addEventListener('click', () => client.start());
 dom.stop.addEventListener('click', () => client.stop());
 dom.volume.addEventListener('input', (event) => client._setVolume(Number(event.target.value) / 100));
 dom.mute.addEventListener('click', () => client._toggleMute());
+dom.bargeIn.addEventListener('change', (event) => client._setBargeIn(event.target.checked));
 window.addEventListener('beforeunload', () => {
   if (client.wantSession) {
     try {

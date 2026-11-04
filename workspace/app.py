@@ -158,6 +158,7 @@ async def _status_payload() -> dict:
             "active": active is not None,
             "state": session_state,
             "last_prompt": dict(active["session"].last_prompt) if active is not None else {},
+            "barge_in": active["session"].barge_in_enabled if active is not None else True,
         },
         "metrics": STATE.metrics.snapshot(),
         "config": {
@@ -330,6 +331,12 @@ async def websocket_session(websocket: WebSocket) -> None:
                 if (isinstance(turn_id, int) and not isinstance(turn_id, bool)
                         and isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)):
                     session.client_playback_stopped(turn_id, float(elapsed))
+            elif kind == "config" and session is not None:
+                session.set_barge_in(bool(payload.get("barge_in", True)))
+                await send_json({
+                    "type": "config_ack",
+                    "barge_in": session.barge_in_enabled,
+                })
             elif kind == "ping":
                 await send_json({"type": "pong"})
     except WebSocketDisconnect:

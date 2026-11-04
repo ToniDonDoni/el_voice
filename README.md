@@ -478,6 +478,14 @@ ordinary Dota conversation need not search. The configured backend is `ddgs`; re
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
+## Interruption toggle
+
+The page has an **Interrupt with voice** checkbox, enabled by default. Leave it on for
+normal hands-free barge-in. Turn it off in noisy places: speech during generation or
+playback is then captured and discarded, and the current answer is allowed to finish.
+The preference is remembered in the browser (`localStorage`) and enforced by the server
+through the WebSocket `config` message, so it applies to both Local and Remote modes.
+
 ## Echo and headphones
 
 The supported acoustic scenario is headphones. The browser requests

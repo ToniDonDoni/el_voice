@@ -154,7 +154,6 @@ class StartupValidationTests(unittest.TestCase):
         invalid = {
             "tts": {"model": "tts/v4_cyrillic.pt", "speaker": "b_lez", "sample_rate": 24000, "cpu_threads": 4},
             "stt": {"model": "stt/small", "language": "ru", "cpu_threads": 4},
-            "llm": {"model": "llm/model.gguf", "context_tokens": 3072, "cpu_threads": 4, "batch_tokens": 256, "max_response_tokens": 192},
             "vad": {"sample_rate": 16000, "frame_samples": 512, "threshold": 0.55, "negative_threshold": 0.35,
                     "start_frames": 3, "end_silence_ms": 640, "min_speech_ms": 240, "pre_roll_ms": 320,
                     "max_utterance_seconds": 45},
@@ -164,7 +163,6 @@ class StartupValidationTests(unittest.TestCase):
         cases = [
             ("tts.sample_rate", lambda cfg: cfg["tts"].update(sample_rate=12345)),
             ("stt.cpu_threads", lambda cfg: cfg["stt"].update(cpu_threads=0)),
-            ("llm.cpu_threads type", lambda cfg: cfg["llm"].update(cpu_threads="four")),
             ("vad.threshold", lambda cfg: cfg["vad"].update(threshold=1.5)),
             ("vad.sample_rate", lambda cfg: cfg["vad"].update(sample_rate=8000)),
             ("vad hysteresis", lambda cfg: cfg["vad"].update(negative_threshold=0.7)),
@@ -176,6 +174,10 @@ class StartupValidationTests(unittest.TestCase):
         async def fetch_status(config):
             with patch.object(voice_pipeline, "_load_settings", return_value=config):
                 runtime = voice_pipeline.VoiceRuntime()
+            class ReadyLLM:
+                async def wait_ready(self):
+                    return {"ready": True, "mode": "local"}
+            runtime.llm_client = ReadyLLM()
             with patch.object(runtime, "_load_models", return_value=None):
                 previous_runtime, previous_boot = app.runtime, app.boot_task
                 app.runtime, app.boot_task = runtime, None
@@ -419,7 +421,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         session.current_turn = turn
         stream = app._llm_items(session, turn, "question")
         try:
-            self.assertEqual(await anext(stream), "token")
+            self.assertEqual(await anext(stream), {"type": "delta", "text": "token"})
             await asyncio.sleep(0.05)
             self.assertLessEqual(produced, 6, "the bounded token queue should stall a fast producer")
             turn.cancel_event.set()
@@ -616,22 +618,6 @@ class RuntimeInferenceLockTests(unittest.TestCase):
                         self.probe.leave()
                 return segments(), None
 
-        class LLM:
-            def __init__(self, probe):
-                self.probe = probe
-
-            def token_eos(self):
-                return 2
-
-            def create_chat_completion(self, **_kwargs):
-                def stream():
-                    call = self.probe.enter()
-                    try:
-                        yield {"choices": [{"delta": {"content": "replacement reply" if call % 2 == 0 else "obsolete"}}]}
-                    finally:
-                        self.probe.leave()
-                return stream()
-
         class Tensor:
             def detach(self):
                 return self
@@ -684,17 +670,14 @@ class RuntimeInferenceLockTests(unittest.TestCase):
 
         runtime = voice_pipeline.VoiceRuntime()
         runtime.config = voice_pipeline._load_settings()
-        probes = {stage: EngineProbe() for stage in ("stt", "llm", "tts")}
+        probes = {stage: EngineProbe() for stage in ("stt", "tts")}
         runtime.whisper = Whisper(probes["stt"])
-        runtime.llm = LLM(probes["llm"])
         runtime.tts = TTS(probes["tts"])
         runtime.torch = Torch()
 
         def invoke(stage, cancelled, result):
             if stage == "stt":
                 result.append(runtime.transcribe(np.zeros(16000, dtype=np.float32), cancelled))
-            elif stage == "llm":
-                result.append("".join(runtime.llm_stream("prompt", cancelled, [])))
             else:
                 result.append(runtime.synthesize("spoken text", cancelled)[0])
 
@@ -725,7 +708,7 @@ class RuntimeInferenceLockTests(unittest.TestCase):
                 self.assertEqual(probe.max_active, 1, f"{stage} obsolete workers must not overlap replacements")
                 self.assertLess(time.monotonic() - cancelled_at, 1,
                                 f"{stage} replacement should finish promptly once residual work exits")
-                if stage in ("stt", "llm"):
+                if stage == "stt":
                     self.assertEqual(obsolete_result, [""], f"cancelled {stage} result must be discarded")
                 self.assertTrue(replacement_result, f"replacement {stage} inference must complete")
 

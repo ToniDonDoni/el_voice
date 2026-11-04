@@ -1,3 +1,4 @@
 - [ ] [Implement local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
 - [ ] [Address SPEC-001 implementation review and complete acceptance evidence](SPEC-001-LOCAL-VOICE-CONVERSATION-REVIEW.md).
 - [ ] [Add Remote Voice with a separate LangChain LLM service and web search](SPEC-002-REMOTE-VOICE-LLM-SERVICE.md).
+- [ ] [Review the SPEC-002 implementation and complete remaining acceptance evidence](SPEC-002-REMOTE-VOICE-LLM-SERVICE-REVIEW.md).

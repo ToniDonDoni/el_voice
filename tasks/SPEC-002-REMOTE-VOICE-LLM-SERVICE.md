@@ -177,11 +177,11 @@ outcomes without modifying the original task or its acceptance criteria.
 
 - [ ] Confirm provider URL, model access, streaming/tool compatibility, and a working
   search backend; record required packages and runtime configuration.
-- [ ] Define the internal streaming/cancellation contract and context ownership.
-- [ ] Extract local Gemma access into the dedicated LLM service.
-- [ ] Implement the remote LangChain agent, bounded context, and real search tool.
-- [ ] Add Local Voice / Remote Voice Compose configurations and runtime secrets.
-- [ ] Integrate voice streaming, cancellation, source display, and mode indication.
-- [ ] Update README, scoped project guidance, locks, and reproducible checks.
+- [x] Define the internal streaming/cancellation contract and context ownership.
+- [x] Extract local Gemma access into the dedicated LLM service.
+- [x] Implement the remote LangChain agent, bounded context, and real search tool.
+- [x] Add Local Voice / Remote Voice Compose configurations and runtime secrets.
+- [x] Integrate voice streaming, cancellation, source display, and mode indication.
+- [x] Update README, scoped project guidance, locks, and reproducible checks.
 - [ ] Complete local and remote acceptance and publish the criterion-by-criterion
   implementation report with remaining limitations.

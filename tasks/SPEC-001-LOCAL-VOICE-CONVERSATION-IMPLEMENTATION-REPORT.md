@@ -1,58 +1,60 @@
-# EL Voice Implementation Report
+# SPEC-001 Implementation Report
 
 ## Summary
 
-Implemented the SPEC-001 review corrections in the mounted `workspace/` source. No dependency or image rebuild is needed. The running voice process has not been restarted, so its imported Python code is still the previous version; restart it to activate the changes. Browser assets are mounted and were verified in the page after cache-busting.
+The browser voice pipeline and the code corrections recorded in the SPEC-001
+review are implemented. Independent review cycle 3 approved the correction scope
+with no remaining blocking code findings. This is **not full SPEC-001 acceptance**:
+the updated deployment has not been activated for an actual browser microphone
+conversation, physical playback, or the required ten-turn measurements. The
+acceptance criteria in the specification are unchanged.
 
-The user requested logs containing recognized speech, assistant replies, and errors. Those text records remain in local Docker logs, as requested; audio payloads are not logged. This means the unchanged specification's no-content-bearing-logs criterion is **not met**.
+The user requested transcript and reply text in local diagnostic logs. Those
+content-bearing logs remain enabled as requested; therefore the original
+no-content-logs privacy criterion is **not met**. This conflict is not hidden by
+the code-review approval.
 
 ## Verification performed
 
-- Python regression suite in the existing `el-voice:dev` image: 18 tests passed (`unittest discover -s /workspace/tests -p 'test_review_*.py'`). Coverage includes duration-limited PCM packetization and browser-credit backpressure over a real Uvicorn WebSocket, preservation of reserved duration while a later packet remains queued behind the sender, stalled-sender teardown/replacement, two contextual WebSocket turns, bounded speech chunks, startup validation, repeated replacement against non-cooperative fake inference workers using production runtime locks, VAD recurrent state, and log payload privacy.
-- `node workspace/tests/browser_playback.test.cjs`: passed. Includes packet validation, stale socket audio/text rejection, playback teardown, gain routing, volume/mute logic, and monotonic queue acknowledgements from both scheduling and source completion.
-- `node workspace/tests/audio_capture.test.cjs`: passed for 44.1/48 kHz resampling, callback partitioning, and buffered tails.
-- `git diff --check` and Python in-memory syntax compilation passed.
-- Re-ran the offline real-model self-test in a separate capped, no-network container without stopping the running service or writing audio files. Whisper recognized synthesized `b_lez` audio; Gemma returned a response; Silero produced 24 kHz audio. This run measured STT cancellation residuals of 1821, 1590, and 1353 ms; LLM generation residuals of 31, 28, and 56 ms; LLM first-token/prompt residual of 24 ms after cancellation before the first token; and TTS residual of 962 ms. STT and TTS discard stale results but do not stop an in-flight native CPU operation immediately. The generated TTS response lasted 52.65 seconds, so response concision/quality still needs evaluation.
-- Rendered-browser inspection at `http://localhost:8765/` confirmed mute and volume controls visible, Start visible, End session hidden while idle, and the mute button toggled its accessible state. No microphone permission was requested and no audio was recorded.
-- The app's FastAPI process was not restarted. Therefore the real-model test exercised the changed runtime directly, while the running site's current WebSocket server still has old in-memory Python code. Full new-code browser conversation through Nginx and physical audibility remain unverified. No browser microphone session was started during these checks.
+- Existing-image Python regression command recorded by independent review:
+  `docker compose run --rm --no-deps -e PYTHONDONTWRITEBYTECODE=1 voice python -m unittest discover -s /workspace/tests -p 'test_review_*.py'` — 18 tests passed. Coverage includes full-queue/stalled-sender teardown, replacement sessions, production runtime locks with uncooperative fake inference, duration-based audio credits and queued reservations, WebSocket two-turn history, text chunking, settings/readiness, VAD state, and log payload checks.
+- `node workspace/tests/browser_playback.test.cjs` — passed, including packet validation, source completion acknowledgements, queue credit, stale socket isolation, and playback teardown.
+- `node workspace/tests/audio_capture.test.cjs` — passed for 44.1/48 kHz resampling, callback partitioning, and buffered tails.
+- `git diff --check` — passed.
+- Independent playback probes confirmed completion sequence `1` after packets 0 and 1, and preserved a queued 800 ms audio reservation after an earlier 815 ms client snapshot.
+- The reviewer inspected the reported offline real-model measurements from an earlier isolated run: Whisper cancellation residuals 1821/1590/1353 ms; LLM generation residuals 31/28/56 ms; LLM prompt residual 24 ms; Silero TTS residual 962 ms. These are samples, not worst-case bounds, and were not repeated in review cycle 3. A generated response lasted 52.65 seconds; answer quality and concision were not evaluated.
+- Rendered UI checks and previous model smoke-test evidence are inherited from the earlier report. No microphone was started and no new browser audio was captured during the review cycle.
 
 ## Acceptance criteria
 
 | Original criterion | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Browser session, continuous capture, start/stop and resource release | Partial | Browser UI and previous microphone session exist; actual start/stop and track release were not repeated against the updated server. |
-| Streaming local VAD, onset/endpoint, pre-roll and noise rejection | Partial | Bundled Silero state and VAD integration tests pass; microphone noise and threshold tuning remain unverified. |
-| Final local Whisper transcription | Partial | Real-model self-test transcribed generated `b_lez` speech; representative microphone accuracy remains unmeasured. |
-| Relevant local Dota response | Partial | Gemma inference completed, but response quality and relevance were not reviewed; one generated response led to 52.65 seconds of TTS. |
-| Incremental LLM-to-Silero playback | Partial | Regression test proves audio is queued before generation ends; physical browser playback with the updated server remains unverified. |
-| Automatic barge-in and bounded cancellation | Partial | Turn events, cancellation-aware waits, locks, and stale-result rejection are covered. Real-model residual work was measured; Whisper and Silero calls still finish their current native operation. Actual browser interruption remains untested. |
-| Unique turn identity and stale-result isolation | Partial | Binary packet/session tests and stale browser socket tests pass; no live stop/start acoustic run was repeated. |
-| Headphones and echo behavior | Partial | UI explains headphone requirement and requests browser echo cancellation; no physical headphone/no-self-trigger test was performed. |
-| Browser-to-container route through Nginx | Partial | Rendered page is reachable at the proxied address; updated Python WebSocket behavior has not been activated in the running process. |
-| Local operation, no audio persistence, no content logs | Not met as written | The self-test used no network and wrote no audio. Requested transcripts/replies remain in Docker logs, which conflicts with the unchanged criterion. No audio payload is logged or saved by the self-test. |
-| Readiness and recovery | Partial | Invalid settings fail readiness; real models initialized in the isolated self-test. New service restart, empty/error paths, and browser reconnect remain unverified. |
-| Ten-turn latency baseline and agreed targets | Not complete | Only model cancellation samples were measured. No 10-turn end-to-end browser p50/p95 baseline or agreed targets exist. |
-| Browser conversation/interruption scenarios | Not complete | Repeated actual turns, LLM/TTS interruption, echo behavior, stop/restart, reconnect, and physical audibility remain manual checks. |
-| Reproducibility | Partial | Existing image and read-only mounts were used. Automated commands and a reusable offline real-model self-test are present in the working tree; end-to-end browser acceptance is outstanding. |
+| Browser session, continuous capture, start/stop and resource release | PARTIAL | UI/session and synthetic lifecycle regressions exist. The updated service was not restarted for a real microphone session; actual track/resource release remains unobserved. |
+| Streaming local VAD, onset/endpoint, pre-roll and noise rejection | PARTIAL | Bundled ONNX VAD state regression passes. Real microphone onset, endpoint, pre-roll, thresholds, and noise rejection remain untested. |
+| Final local Whisper transcription | PARTIAL | Earlier isolated local-model round trip recognized generated speech. Representative microphone transcription accuracy was not measured. |
+| Relevant local Dota response | PARTIAL | Earlier Gemma smoke test produced a response; Russian relevance, contextual quality, and concision have not been evaluated. |
+| Incremental LLM-to-Silero playback | PARTIAL | Incremental TTS pipeline and audio credit/backpressure regressions pass. Audible browser playback while generation continues was not observed. |
+| Automatic barge-in and bounded cancellation | PARTIAL | Cancellation, stale-turn isolation, and replacement tests pass at the application boundary; reported real-model residual samples show native STT/TTS work can continue. Live interruption and a general residual-work bound are unverified. |
+| Unique turn identity and stale-result isolation | PARTIAL | UUID, stale socket, replacement, and audio framing regressions pass. No live acoustic replacement turn was tested. |
+| Headphones and echo behavior | PARTIAL | Headphone notice and best-effort echo-cancellation settings are implemented. No physical headphone/no-self-trigger test was performed. |
+| Browser-to-container route through Nginx | PARTIAL | The browser route was previously rendered through the proxy. The updated WebSocket server was not activated and exercised end to end in this review. |
+| Local operation, no audio persistence, no content logs | NOT MET | No audio payload is intentionally logged; however, requested transcripts and replies are logged, contrary to the unchanged criterion. Full runtime storage/log inspection after a real session remains pending. |
+| Readiness and recovery | PARTIAL | Settings/readiness, disconnect, failed sender, and replacement regressions pass. Updated deployment startup and live reconnect/recovery remain unverified. |
+| Ten-turn latency baseline and agreed targets | NOT VERIFIED | No ten-turn end-to-end speech-end-to-audible and interruption measurements, p50/p95, or agreed targets are available. |
+| Browser conversation/interruption scenarios | NOT VERIFIED | Multiple live turns, interruption during generation and playback, headphones, stop/restart, reconnect, physical output, and post-session privacy inspection remain outstanding. |
+| Reproducibility | PARTIAL | Focused Python/Node checks pass against the existing image/source. The new Compose graph has not been built or activated; manual browser scenarios remain outstanding. |
 
-## Activate the implementation
+## Review outcome and remaining acceptance
 
-The changed Python files are bind-mounted into the current container, so rebuild is unnecessary. Restart the voice service to load them:
+The independent SPEC-001 review cycle 3 is recorded in
+[`SPEC-001-LOCAL-VOICE-CONVERSATION-REVIEW.md`](SPEC-001-LOCAL-VOICE-CONVERSATION-REVIEW.md).
+It approves the reviewed code corrections, including the prior audio-credit,
+completion-acknowledgement, queued-reservation, chunk-bound, and settings issues.
+It explicitly leaves full original acceptance incomplete.
 
-```sh
-docker compose restart voice
-curl --fail http://localhost:8765/api/status
-```
-
-The reproducible real-model check is:
-
-```sh
-docker run --rm --network none --read-only \
-  --tmpfs /tmp:size=512m,mode=1777 --cpus 4 --memory 6g \
-  --user 10001:10001 -e EL_VOICE_MODELS=/models \
-  -v "$PWD/workspace:/workspace:ro" -v "$PWD/models:/models:ro" \
-  -w /workspace --entrypoint python el-voice:dev \
-  /workspace/tests/real_model_pipeline_selftest.py
-```
-
-The remaining physical microphone, echo, interruption, audible-output, and 10-turn performance criteria require an actual browser session on the target Mac. The application should be restarted before those checks.
+To finish acceptance, start the selected Compose mode, verify readiness, then run
+the real-browser scenarios from the unchanged specification on the target Mac.
+Record ten-turn p50/p95 response and interruption latency, physical `b_lez`
+playback, headphone echo behavior, reconnect/restart, and storage/log inspection.
+Do not mark the privacy criterion complete while transcript/reply content remains
+in logs.

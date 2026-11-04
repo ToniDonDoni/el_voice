@@ -1,0 +1,55 @@
+name: el-voice
+
+services:
+  voice:
+    environment:
+      EL_VOICE_MODE: remote
+      LLM_SERVICE_URL: http://llm:8001
+    depends_on:
+      llm:
+        condition: service_healthy
+
+  llm:
+    image: el-voice:dev
+    platform: linux/arm64
+    build:
+      context: .
+    command: [python, -m, uvicorn, llm_service.app:app, --app-dir, /workspace, --host, 0.0.0.0, --port, "8001"]
+    environment:
+      EL_VOICE_MODE: remote
+      LLM_CONTEXT_TOKEN_BUDGET: "2400"
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
+      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4.1-flash}
+      WEB_SEARCH_BACKEND: ${WEB_SEARCH_BACKEND:-duckduckgo}
+      LANGCHAIN_TRACING_V2: "false"
+      LANGSMITH_TRACING: "false"
+    networks: [private, llm_egress]
+    volumes:
+      - ./workspace:/workspace:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 3
+    mem_limit: 3g
+    pids_limit: 128
+    stop_grace_period: 15s
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8001/healthz',timeout=3)); assert d.get('ready')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+  download:
+    command:
+      - python
+      - /opt/el-voice/download_models.py
+      - --only
+      - stt/small
+      - tts/v4_cyrillic.pt
+
+networks:
+  llm_egress: {}

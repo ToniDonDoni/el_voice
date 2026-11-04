@@ -60,6 +60,11 @@ h1 span { color: #75837f; }
 .message.user .message-body { border-color: rgba(142,240,196,.15); border-radius: 13px 4px 13px 13px; background: rgba(57,123,98,.16); color: #d8f2e6; }
 .message.interrupted .message-body { opacity: .65; }
 .message-status { margin: 5px 2px 0; color: #77847f; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.source-list { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 9px; }
+.source-heading { margin-bottom: 6px; color: #8db9a5; font: 500 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.source-list ul { display: grid; gap: 8px; margin: 0; padding-left: 16px; }
+.source-list a { color: var(--mint); font-size: 11px; text-decoration: underline; text-underline-offset: 2px; }
+.source-list p { margin: 3px 0 0; color: #87938f; font-size: 10px; line-height: 1.5; }
 .controls { display: flex; min-height: 76px; align-items: center; gap: 15px; padding: 13px 18px; border-top: 1px solid var(--line); }
 .primary-button, .stop-button { display: inline-flex; min-height: 42px; align-items: center; justify-content: center; gap: 10px; border: 0; border-radius: 10px; padding: 0 18px; cursor: pointer; font-size: 12px; font-weight: 800; transition: transform .15s ease, background .15s ease, opacity .15s ease; }
 .primary-button { color: #07140f; background: var(--mint); }

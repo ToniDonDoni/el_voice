@@ -37,6 +37,10 @@ browser acceptance checks have been completed.
   and the UI shows clickable sources. Spoken replies remain concise and do not
   read raw URLs. Search is invoked when requested or needed for current facts;
   ordinary conversational turns need not search.
+- Remote mode uses a separate search-oriented system prompt: explicit "search" requests and
+  current-fact questions must invoke the `web_search` tool before answering, and a
+  non-Dota question must not be refused when search can answer it. Local mode keeps the
+  offline prompt without tool instructions.
 - Send a unique `x-opencode-session` value per conversation/session in every provider
   request, stable for all turns of that session and not shared between sessions; the
   value is routing metadata, not a credential, and must not be logged with content.

@@ -143,7 +143,11 @@ class ServiceConfig:
 
     @property
     def system_prompt(self) -> str:
-        return str(self.settings["llm"]["system_prompt"])
+        llm = self.settings["llm"]
+        if self.mode == "remote":
+            # Remote mode has web_search; local mode must not be told about it.
+            return str(llm.get("remote_system_prompt") or llm["system_prompt"])
+        return str(llm["system_prompt"])
 
     @property
     def llm_settings(self) -> dict:

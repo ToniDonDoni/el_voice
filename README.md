@@ -478,6 +478,14 @@ ordinary Dota conversation need not search. The configured backend is `ddgs`; re
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
+## Remote search behaviour
+
+Remote mode uses a search-oriented system prompt (`llm.remote_system_prompt` in
+`settings.json`). When the user asks to search or asks for current facts (weather, news,
+the current patch, prices) the model must call `web_search` first, then answer from the
+sourced results; it no longer refuses a question just because it is not about Dota. Local
+mode keeps the offline Dota prompt and is never told about a search tool.
+
 ## Correlated diagnostic logs
 
 Every answer is traced across both services by three ids: the WebSocket session

@@ -92,17 +92,19 @@ async def stream_agent(
     agent: Any, messages: list[Any], cancelled: Any, *,
     max_tool_calls: int, max_snippet_chars: int, observe: Any,
 ) -> AsyncIterator[dict[str, Any]]:
-    """Yield only committed final-answer text and validated tool metadata."""
+    """Stream only explicitly committed final speech from one LangChain agent."""
     from contextlib import aclosing
 
-    pending_text: list[str] = []
     tool_count = 0
+    answer_committed = False
     answer_emitted = False
     all_sources: list[dict[str, str]] = []
     known_urls: set[str] = set()
+    call_names: dict[str, str] = {}
+
     request = agent.astream(
         {"messages": messages},
-        config={"recursion_limit": 2 * max_tool_calls + 2},
+        config={"recursion_limit": 2 * max_tool_calls + 4},
         stream_mode=["messages", "updates"],
     )
     async with aclosing(request):
@@ -116,11 +118,15 @@ async def stream_agent(
                 chunk, metadata = data
                 if not isinstance(metadata, dict) or metadata.get("langgraph_node") != "model":
                     continue
-                if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
+                if not answer_committed:
+                    # Planning messages are never user-facing speech.
                     continue
+                if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
+                    raise RuntimeError("provider_tool_loop_failed")
                 text = _text(chunk)
                 if text:
-                    pending_text.append(text)
+                    answer_emitted = True
+                    yield {"type": "delta", "text": text}
                 continue
             if mode != "updates" or not isinstance(data, dict):
                 continue
@@ -130,46 +136,54 @@ async def stream_agent(
                     continue
                 response = outputs[-1]
                 calls = list(getattr(response, "tool_calls", None) or [])
-                if calls:
-                    # Discard model preambles preceding a tool call.
-                    pending_text.clear()
-                    tool_count += len(calls)
+                if answer_committed:
+                    if calls:
+                        raise RuntimeError("provider_tool_loop_failed")
+                    if not answer_emitted and _text(response):
+                        answer_emitted = True
+                        yield {"type": "delta", "text": _text(response)}
+                    continue
+                if not calls:
+                    # A planning step must explicitly enter final-answer mode.
+                    # Never speak a possible tool-call preamble.
+                    raise RuntimeError("provider_tool_loop_failed")
+                for call in calls:
+                    call_id = str(call.get("id") or "")
+                    name = str(call.get("name") or "")
+                    call_names[call_id] = name
+                    if name == "begin_final_answer":
+                        observe("agent_answer_committed", tool_call_id=call_id)
+                        continue
+                    if name != "web_search":
+                        raise RuntimeError("provider_tool_loop_failed")
+                    tool_count += 1
                     if tool_count > max_tool_calls:
                         raise RuntimeError("provider_tool_loop_failed")
-                    for call in calls:
-                        call_id = str(call.get("id") or "")
-                        name = str(call.get("name") or "")
-                        observe("agent_tool_call", tool_name=name, tool_call_id=call_id)
-                        yield {"type": "tool_call", "name": name, "tool_call_id": call_id, "result_count": 0}
-                    continue
-                # An update without a tool request confirms a final model answer.
-                chunks = pending_text or [_text(response)]
-                pending_text = []
-                for chunk in chunks:
-                    if cancelled.is_set():
-                        return
-                    if chunk:
-                        answer_emitted = True
-                        yield {"type": "delta", "text": chunk}
+                    observe("agent_tool_call", tool_name=name, tool_call_id=call_id)
+                    yield {"type": "tool_call", "name": name,
+                           "tool_call_id": call_id, "result_count": 0}
                 continue
             if "tools" in data:
                 for result in _messages(data["tools"]):
                     if getattr(result, "type", None) != "tool" and type(result).__name__ != "ToolMessage":
                         continue
                     call_id = str(getattr(result, "tool_call_id", ""))
-                    name = str(getattr(result, "name", None) or "web_search")
+                    name = str(getattr(result, "name", None) or call_names.get(call_id, ""))
+                    if name == "begin_final_answer":
+                        if getattr(result, "status", None) == "error":
+                            raise RuntimeError("provider_tool_loop_failed")
+                        answer_committed = True
+                        continue
                     if name != "web_search":
                         raise RuntimeError("provider_tool_loop_failed")
                     sources = _sources(result, max_snippet_chars)
                     observe("agent_tool_result", tool_name=name, tool_call_id=call_id,
                             result_count=len(sources))
-                    # The browser replaces its source list on every update.
-                    # Send the bounded deduplicated set accumulated for this turn.
                     for source in sources:
                         if source["url"] not in known_urls and len(all_sources) < 5:
                             known_urls.add(source["url"])
                             all_sources.append(source)
                     yield {"type": "sources", "sources": list(all_sources),
                            "tool_call_id": call_id}
-    if not cancelled.is_set() and not answer_emitted:
+    if not cancelled.is_set() and (not answer_committed or not answer_emitted):
         raise RuntimeError("empty_generation")

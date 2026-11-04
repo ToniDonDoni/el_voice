@@ -56,14 +56,20 @@ def search_sync(query: str, backend: str, max_results: int,
 
 class WebSearch:
     def __init__(self, backend: str | None = None, max_results: int = 5,
-                 timeout_seconds: float = 10.0, max_snippet_chars: int = 500,
+                 timeout_seconds: float | None = None, max_snippet_chars: int | None = None,
                  max_concurrent: int = 2):
         self.backend = backend or os.getenv("WEB_SEARCH_BACKEND", "auto")
         if self.backend not in {"auto", "duckduckgo", "bing", "brave", "google", "mojeek", "startpage", "yandex", "yahoo", "wikipedia"}:
             raise ValueError("WEB_SEARCH_BACKEND is not a supported search provider")
+        timeout_seconds = timeout_seconds if timeout_seconds is not None else float(
+            os.getenv("WEB_SEARCH_TIMEOUT_SECONDS", "10")
+        )
+        max_snippet_chars = max_snippet_chars if max_snippet_chars is not None else int(
+            os.getenv("WEB_SEARCH_MAX_SNIPPET_CHARS", "500")
+        )
         self.max_results = min(5, max(1, max_results))
-        self.timeout_seconds = min(10.0, max(1.0, timeout_seconds))
-        self.max_snippet_chars = min(800, max(100, max_snippet_chars))
+        self.timeout_seconds = min(120.0, max(1.0, timeout_seconds))
+        self.max_snippet_chars = min(20_000, max(100, max_snippet_chars))
         self.worker_slots = asyncio.Semaphore(min(4, max(1, max_concurrent)))
 
     async def _spawn_worker(self):
@@ -138,14 +144,15 @@ class WebSearch:
     async def tool_payload(self, query: str) -> str:
         results = await self.search(query)
         bounded = []
+        max_payload_chars = max(6000, self.max_snippet_chars + 1500)
         for item in results[:self.max_results]:
             candidate = {"title": str(item.get("title", "Search result"))[:150],
                          "url": str(item.get("url", ""))[:512],
-                         "snippet": str(item.get("snippet", ""))[:500]}
+                         "snippet": str(item.get("snippet", ""))[:self.max_snippet_chars]}
             if not public_https_url(candidate["url"]):
                 continue
             trial = json.dumps({"query": query[:240], "results": [*bounded, candidate]}, ensure_ascii=False)
-            if len(trial) > 6000:
+            if len(trial) > max_payload_chars:
                 break
             bounded.append(candidate)
         return json.dumps({"query": query[:240], "results": bounded}, ensure_ascii=False)

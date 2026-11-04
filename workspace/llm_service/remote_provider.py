@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 from contextvars import ContextVar
 import json
 import logging
@@ -11,6 +12,8 @@ import re
 import time
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
+
+import httpx
 
 from .context import paired_tool_messages
 from .search import SearchFailure, WebSearch, make_langchain_search_tool
@@ -24,6 +27,130 @@ logger = logging.getLogger("el_voice.remote_provider")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     logger.addHandler(logging.StreamHandler())
+
+
+class _ObservedProviderStream(httpx.AsyncByteStream):
+    """Count OpenAI-compatible SSE bytes and terminal markers without logging content."""
+
+    def __init__(self, source: httpx.AsyncByteStream, context: dict[str, Any]):
+        self.source = source
+        self.context = context
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.pending_line = ""
+        self.terminal = False
+        self.metrics: dict[str, Any] = {
+            "transport_chunk_count": 0,
+            "body_bytes": 0,
+            "sse_data_line_count": 0,
+            "sse_json_event_count": 0,
+            "sse_json_parse_error_count": 0,
+            "done_marker_seen": False,
+            "choice_delta_count": 0,
+            "content_chars": 0,
+            "reasoning_chars": 0,
+            "tool_call_delta_count": 0,
+            "finish_reason": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "provider_error_type": None,
+        }
+
+    def _consume(self, text: str) -> None:
+        self.pending_line += text
+        if len(self.pending_line) > 1_048_576 and "\n" not in self.pending_line:
+            self.metrics["sse_json_parse_error_count"] += 1
+            self.pending_line = ""
+            return
+        while "\n" in self.pending_line:
+            line, self.pending_line = self.pending_line.split("\n", 1)
+            self._consume_line(line.rstrip("\r"))
+
+    def _consume_line(self, line: str) -> None:
+        if not line.startswith("data:"):
+            return
+        self.metrics["sse_data_line_count"] += 1
+        data = line[5:].strip()
+        if data == "[DONE]":
+            self.metrics["done_marker_seen"] = True
+            return
+        try:
+            payload = json.loads(data)
+        except (TypeError, ValueError):
+            self.metrics["sse_json_parse_error_count"] += 1
+            return
+        self.metrics["sse_json_event_count"] += 1
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            self.metrics["provider_error_type"] = str(
+                error.get("type") or error.get("code") or "provider_error"
+            )[:100]
+        if not isinstance(payload, dict):
+            return
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            self.metrics["prompt_tokens"] = usage.get("prompt_tokens")
+            self.metrics["completion_tokens"] = usage.get("completion_tokens")
+        for choice in payload.get("choices", []) or []:
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta") or {}
+            if isinstance(delta, dict):
+                self.metrics["choice_delta_count"] += 1
+                content = delta.get("content")
+                if isinstance(content, str):
+                    self.metrics["content_chars"] += len(content)
+                elif isinstance(content, list):
+                    self.metrics["content_chars"] += sum(
+                        len(part.get("text", "")) for part in content
+                        if isinstance(part, dict) and isinstance(part.get("text"), str)
+                    )
+                for key in ("reasoning_content", "reasoning"):
+                    value = delta.get(key)
+                    if isinstance(value, str):
+                        self.metrics["reasoning_chars"] += len(value)
+                    elif isinstance(value, list):
+                        self.metrics["reasoning_chars"] += sum(
+                            len(part.get("text", "")) for part in value
+                            if isinstance(part, dict) and isinstance(part.get("text"), str)
+                        )
+                tool_calls = delta.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    self.metrics["tool_call_delta_count"] += len(tool_calls)
+            finish_reason = choice.get("finish_reason")
+            if finish_reason is not None:
+                self.metrics["finish_reason"] = str(finish_reason)[:100]
+
+    def _emit(self, event: str, **fields: Any) -> None:
+        log_structured(logger, event, **self.context, **self.metrics, **fields)
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self.source:
+                self.metrics["transport_chunk_count"] += 1
+                self.metrics["body_bytes"] += len(chunk)
+                self._consume(self.decoder.decode(chunk, final=False))
+                yield chunk
+            self._consume(self.decoder.decode(b"", final=True))
+            if self.pending_line:
+                self._consume_line(self.pending_line.rstrip("\r"))
+                self.pending_line = ""
+            self.terminal = True
+            self._emit("provider_response_body_completed", transport_eof=True)
+        except asyncio.CancelledError:
+            self.terminal = True
+            self._emit("provider_response_body_cancelled", transport_eof=False)
+            raise
+        except Exception as exc:
+            self.terminal = True
+            self._emit("provider_response_body_failed", transport_eof=False,
+                       error_type=type(exc).__name__)
+            raise
+
+    async def aclose(self) -> None:
+        if not self.terminal:
+            self.terminal = True
+            self._emit("provider_response_body_closed_early", transport_eof=False)
+        await self.source.aclose()
 SYSTEM_PROMPT = (
     "You are a concise, practical, Russian-speaking Elden Ring companion. Answer in Russian unless "
     "the user asks for another language. Help with the base game and Shadow of the Erdtree, including "
@@ -101,10 +228,12 @@ def _message_content(message: Any) -> str:
 class OpenCodeLangChainProvider:
     def __init__(self, api_key: str | None = None, base_url: str | None = None,
                  model: str | None = None, search: WebSearch | None = None,
-                 max_response_tokens: int = 256, tool_iterations: int = 3):
+                 max_response_tokens: int | None = None, tool_iterations: int | None = None):
         self.api_key = api_key if api_key is not None else os.getenv("OPENCODE_GO_API_KEY")
         self.base_url = (base_url or os.getenv("OPENCODE_GO_BASE_URL", DEFAULT_BASE_URL)).rstrip("/")
         self.model_name = model or os.getenv("OPENCODE_GO_MODEL", DEFAULT_MODEL)
+        max_response_tokens = max_response_tokens or int(os.getenv("LLM_REMOTE_MAX_RESPONSE_TOKENS", "256"))
+        tool_iterations = tool_iterations or int(os.getenv("LLM_TOOL_ITERATIONS", "3"))
         validate_provider_config(self.api_key, self.base_url, self.model_name)
         import httpx
         from langchain_openai import ChatOpenAI
@@ -135,7 +264,7 @@ class OpenCodeLangChainProvider:
         )
         self.search = search or WebSearch()
         self.search_tool = make_langchain_search_tool(self.search, self._observe_tool_event)
-        self.tool_iterations = min(3, max(1, tool_iterations))
+        self.tool_iterations = min(18, max(1, tool_iterations))
         self.max_response_tokens = max_response_tokens
 
     async def _attach_session_header(self, request: Any) -> None:
@@ -147,10 +276,20 @@ class OpenCodeLangChainProvider:
         request_index = self._request_index.get() + 1
         self._request_index.set(request_index)
         request.extensions["el_voice_request_index"] = request_index
+        request.extensions["el_voice_trace_id"] = self._trace_id.get()
+        request.extensions["el_voice_session_id"] = self._session_id.get()
+        try:
+            payload = json.loads(request.content)
+        except (TypeError, ValueError):
+            payload = {}
         log_structured(logger, "provider_request_started", trace_id=self._trace_id.get(),
                        turn_id=self._trace_id.get(), session_id=self._session_id.get(),
                        request_index=request_index, provider_host=request.url.host,
-                       path=request.url.path, model=self.model_name)
+                       path=request.url.path, model=payload.get("model", self.model_name),
+                       max_output_tokens=payload.get("max_tokens", payload.get("max_completion_tokens")),
+                       reasoning_effort=payload.get("reasoning_effort"),
+                       thinking_enabled=payload.get("thinking", {}).get("type") == "enabled"
+                       if isinstance(payload.get("thinking"), dict) else False)
 
     def _observe_tool_event(self, event: str, **fields: Any) -> None:
         trace_id = self._trace_id.get()
@@ -166,14 +305,27 @@ class OpenCodeLangChainProvider:
             requested_model = None
         started_at = request.extensions.get("el_voice_started_at")
         duration_ms = round((time.monotonic() - started_at) * 1000, 1) if started_at else None
-        trace_id = self._trace_id.get()
+        trace_id = request.extensions.get("el_voice_trace_id", self._trace_id.get())
+        context = {
+            "trace_id": trace_id,
+            "turn_id": trace_id,
+            "session_id": request.extensions.get("el_voice_session_id", self._session_id.get()),
+            "request_index": request.extensions.get("el_voice_request_index"),
+            "provider_host": request.url.host,
+            "path": request.url.path,
+            "model": requested_model or self.model_name,
+            "status_code": response.status_code,
+            "content_type": response.headers.get("content-type", "").split(";", 1)[0],
+        }
         log_structured(logger, "remote_provider_http_response", trace_id=trace_id,
-                       turn_id=trace_id, session_id=self._session_id.get(),
-                       request_index=request.extensions.get("el_voice_request_index"),
-                       provider_host=request.url.host, path=request.url.path,
-                       model=requested_model or self.model_name,
-                       status_code=response.status_code, duration_ms=duration_ms,
+                       turn_id=trace_id, session_id=context["session_id"],
+                       request_index=context["request_index"],
+                       provider_host=context["provider_host"], path=context["path"],
+                       model=context["model"], status_code=response.status_code,
+                       stage="response_headers", content_type=context["content_type"],
+                       duration_ms=duration_ms,
                        session_header_present=bool(request.headers.get("x-opencode-session")))
+        response.stream = _ObservedProviderStream(response.stream, context)
 
     async def _search_context(self, user_text: str, history: list[dict[str, str]],
                               model: Any) -> tuple[list[Any], list[dict[str, str]]]:
@@ -247,7 +399,9 @@ class OpenCodeLangChainProvider:
                         source_results.append({
                             "title": str(item.get("title", "Search result"))[:200],
                             "url": str(item.get("url", ""))[:2048],
-                            "snippet": str(item.get("snippet", ""))[:500],
+                            "snippet": str(item.get("snippet", ""))[
+                                :getattr(self.search, "max_snippet_chars", 500)
+                            ],
                         })
                 break
         return pairs, source_results
@@ -290,13 +444,79 @@ class OpenCodeLangChainProvider:
                 messages[0] = SystemMessage(content=SYSTEM_PROMPT + "\n\n" + search_context)
                 yield {"type": "tool_call", "name": "web_search", "result_count": len(sources)}
                 yield {"type": "sources", "sources": sources}
-            async for chunk in self.model.astream(messages):
-                if cancelled.is_set():
-                    return
-                text = _message_content(chunk)
-                # The final stream is tools-disabled. Never forward control/tool-call content.
-                if text and not getattr(chunk, "tool_calls", None) and not getattr(chunk, "tool_call_chunks", None):
-                    yield {"type": "delta", "text": text}
+            stream_started = time.monotonic()
+            chunk_count = 0
+            content_chars = 0
+            reasoning_chars = 0
+            tool_call_chunk_count = 0
+            finish_reason = None
+            self._observe_tool_event("remote_model_stream_started", streaming=True)
+            try:
+                async for chunk in self.model.astream(messages):
+                    if cancelled.is_set():
+                        self._observe_tool_event(
+                            "remote_model_stream_cancelled", chunk_count=chunk_count,
+                            content_chars=content_chars, reasoning_chars=reasoning_chars,
+                            duration_ms=round((time.monotonic() - stream_started) * 1000, 1),
+                        )
+                        return
+                    chunk_count += 1
+                    text = _message_content(chunk)
+                    chunk_text_chars = len(text)
+                    content_chars += chunk_text_chars
+                    additional = getattr(chunk, "additional_kwargs", {}) or {}
+                    reasoning = additional.get("reasoning_content", additional.get("reasoning", ""))
+                    if isinstance(reasoning, str):
+                        chunk_reasoning_chars = len(reasoning)
+                    elif isinstance(reasoning, list):
+                        chunk_reasoning_chars = sum(
+                            len(part.get("text", "")) for part in reasoning
+                            if isinstance(part, dict) and isinstance(part.get("text"), str)
+                        )
+                    else:
+                        chunk_reasoning_chars = 0
+                    reasoning_chars += chunk_reasoning_chars
+                    tool_calls = getattr(chunk, "tool_call_chunks", None) or []
+                    tool_call_chunk_count += len(tool_calls)
+                    metadata = getattr(chunk, "response_metadata", {}) or {}
+                    chunk_finish_reason = metadata.get("finish_reason")
+                    if chunk_finish_reason is not None:
+                        finish_reason = str(chunk_finish_reason)[:100]
+                    self._observe_tool_event(
+                        "remote_model_chunk_parsed", chunk_index=chunk_count,
+                        content_chars=chunk_text_chars,
+                        reasoning_chars=chunk_reasoning_chars,
+                        tool_call_chunk_count=len(tool_calls),
+                        finish_reason=finish_reason,
+                        chunk_type=type(chunk).__name__,
+                    )
+                    # The final stream is tools-disabled. Never forward control/tool-call content.
+                    if text and not getattr(chunk, "tool_calls", None) and not tool_calls:
+                        yield {"type": "delta", "text": text}
+            except asyncio.CancelledError:
+                self._observe_tool_event(
+                    "remote_model_stream_cancelled", chunk_count=chunk_count,
+                    content_chars=content_chars, reasoning_chars=reasoning_chars,
+                    duration_ms=round((time.monotonic() - stream_started) * 1000, 1),
+                )
+                raise
+            except Exception as exc:
+                self._observe_tool_event(
+                    "remote_model_stream_failed", chunk_count=chunk_count,
+                    content_chars=content_chars, reasoning_chars=reasoning_chars,
+                    error_type=type(exc).__name__,
+                    duration_ms=round((time.monotonic() - stream_started) * 1000, 1),
+                )
+                raise
+            else:
+                self._observe_tool_event(
+                    "remote_model_stream_completed", normal_eof=True,
+                    chunk_count=chunk_count, content_chars=content_chars,
+                    reasoning_chars=reasoning_chars,
+                    tool_call_chunk_count=tool_call_chunk_count,
+                    finish_reason=finish_reason,
+                    duration_ms=round((time.monotonic() - stream_started) * 1000, 1),
+                )
         except asyncio.CancelledError:
             raise
         except SearchFailure:

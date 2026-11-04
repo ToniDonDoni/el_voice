@@ -16,6 +16,7 @@ class Element {
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; }
   querySelector() { return new Element(); }
+  remove() {}
 }
 
 class FakeAudioContext {
@@ -176,6 +177,24 @@ async function run() {
     await api.handleServerMessage(new ArrayBuffer(8));
     assert.equal(audio.sources.filter(source => source.when !== undefined).length, accepted,
       "invalid packets must not reach AudioContext");
+  });
+
+  await check("fallback replacement clears partial text and stops queued playback", async () => {
+    const { api } = harness();
+    const audio = new FakeAudioContext();
+    const socket = new FakeWebSocket();
+    api.setAudio(audio, socket);
+    const turn = "00112233445566778899aabbccddeeff";
+    await api.handleServerMessage(JSON.stringify({ type: "text_delta", turn_id: turn, text: "Partial reply." }));
+    await api.handleServerMessage(makePacket(turn, 0, 24000));
+    const partialSource = audio.sources.find(source => source.when !== undefined);
+    assert.ok(partialSource, "the partial response should already be scheduled");
+    await api.handleServerMessage(JSON.stringify({ type: "response_replace", turn_id: turn, text: "Я так качался" }));
+    assert.equal(api.getAssistantText(turn), "Я так качался", "fallback text must replace partial output");
+    assert.equal(partialSource.stopped, true, "already queued partial audio must stop");
+    await api.handleServerMessage(makePacket(turn, 0, 24000));
+    const fallbackSource = audio.sources.filter(source => source.when !== undefined && !source.stopped);
+    assert.equal(fallbackSource.length, 1, "fallback audio must be allowed to play after replacement");
   });
 
   await check("interruption discards delayed audio from the cancelled turn", async () => {

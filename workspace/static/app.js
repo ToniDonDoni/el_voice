@@ -27,12 +27,15 @@ let playbackFinishedTurns = new Set();
 let cancelledTurns = new Set();
 let messageNodes = new Map();
 let playbackSources = new Map();
+let playbackGeneration = new Map();
 let nextPlaybackTime = new Map();
 let audioSequence = new Map();
 let playbackBufferedMs = new Map();
 let outputGain = null;
 let volumeMuted = false;
 let echoCancellationSetting = "not checked";
+let unavailableAudioTurns = new Set();
+let fallbackTurns = new Set();
 
 function setStatus(label, state = "") {
   statusLabel.textContent = label;
@@ -120,8 +123,9 @@ function addSources(turnId, sources) {
 }
 
 function stopPlayback(turnId = null) {
-  const ids = turnId ? [turnId] : [...playbackSources.keys()];
+  const ids = turnId ? [turnId] : [...new Set([...playbackSources.keys(), ...nextPlaybackTime.keys()])];
   for (const id of ids) {
+    playbackGeneration.set(id, (playbackGeneration.get(id) || 0) + 1);
     const sources = playbackSources.get(id);
     if (sources) {
       for (const source of sources) {
@@ -183,6 +187,7 @@ async function playPCM(buffer, metadata) {
   const turnId = metadata.turn_id;
   if (currentResponseTurn && currentResponseTurn !== turnId) stopPlayback(currentResponseTurn);
   currentResponseTurn = turnId;
+  const generation = playbackGeneration.get(turnId) || 0;
   const samples = new Int16Array(buffer);
   const audioBuffer = audioContext.createBuffer(1, samples.length, metadata.sample_rate);
   const channel = audioBuffer.getChannelData(0);
@@ -217,6 +222,7 @@ async function playPCM(buffer, metadata) {
   }
   source.onended = () => {
     sources.delete(source);
+    if ((playbackGeneration.get(turnId) || 0) !== generation) return;
     if (!cancelledTurns.has(turnId) && socket?.readyState === WebSocket.OPEN) {
       const updatedBufferedMs = Math.max(0,
         ((nextPlaybackTime.get(turnId) || audioContext.currentTime) - audioContext.currentTime) * 1000);
@@ -333,9 +339,31 @@ async function handleServerMessage(data) {
     case "text_delta":
       appendAssistantText(event.turn_id, event.text);
       break;
+    case "response_replace": {
+      const turnId = event.turn_id;
+      turnComplete.delete(turnId);
+      playbackFinishedTurns.delete(turnId);
+      unavailableAudioTurns.delete(turnId);
+      fallbackTurns.add(turnId);
+      if (pendingAudio?.turn_id === turnId) pendingAudio = null;
+      stopPlayback(turnId);
+      const article = messageNodes.get(`assistant:${turnId}`)?.article;
+      article?.querySelector(".source-list")?.remove();
+      article?.querySelector(".message-status")?.remove();
+      assistantBody(turnId).textContent = String(event.text || "Я так качался");
+      scrollMessages();
+      setStatus("Using a fallback response", "busy");
+      break;
+    }
+    case "response_audio_unavailable":
+      unavailableAudioTurns.add(event.turn_id);
+      addMessageStatus(event.turn_id, "Fallback response shown; voice synthesis failed");
+      break;
     case "turn_complete":
       turnComplete.add(event.turn_id);
-      addMessageStatus(event.turn_id, "Response generated");
+      addMessageStatus(event.turn_id, unavailableAudioTurns.has(event.turn_id)
+        ? "Fallback response shown; voice synthesis failed"
+        : fallbackTurns.has(event.turn_id) ? "Fallback response" : "Response generated");
       if (!playbackSources.get(event.turn_id)?.size) finishPlayback(event.turn_id);
       break;
     case "turn_failed":

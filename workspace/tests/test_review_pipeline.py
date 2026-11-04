@@ -918,7 +918,7 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_disabled_interruption_recovers_after_turn_error(self):
+    async def test_disabled_interruption_recovers_after_partial_generation_failure(self):
         import uvicorn
         import websockets
 
@@ -1005,15 +1005,17 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     }))
                     await receive_event(client, "session_started")
 
-                    # A failure after partial synthesis must finish queued audio and release its server slot.
+                    # A generation failure after partial audio replaces the partial reply with a spoken fallback.
                     await client.send(b"\x00\x00" * 512)
                     await client.send(b"\x00\x00" * 512)
                     await receive_event(client, "audio_chunk")
-                    failed = await receive_event(client, "error")
-                    self.assertEqual(failed["code"], "RuntimeError")
-                    failed_done = await receive_event(client, "turn_failed")
+                    replacement = await receive_event(client, "response_replace")
+                    self.assertEqual(replacement["text"], "Я так качался")
+                    fallback_audio = await receive_event(client, "audio_chunk")
+                    self.assertEqual(fallback_audio["turn_id"], replacement["turn_id"])
+                    failed_done = await receive_event(client, "turn_complete")
                     self.assertEqual(app.active_session.current_turn.turn_id, failed_done["turn_id"],
-                                     "the failed turn must remain active until its queued audio completes")
+                                     "the recovered turn must stay active until fallback audio completes")
                     await client.send(json.dumps({
                         "type": "playback_finished", "turn_id": failed_done["turn_id"],
                     }))
@@ -1309,8 +1311,9 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     ignored, _ = await receive_event(client, {"speech_ignored", "interrupt"})
                     self.assertEqual(ignored["type"], "speech_ignored",
                                      "disabled interruption must not stop current playback")
-                    self.assertIn({"type": "interrupt_setting", "enabled": False}, observed_events,
-                                  "the active WebSocket must acknowledge the live enabled-to-disabled change")
+                    self.assertTrue(any(event.get("type") == "interrupt_setting"
+                                        and event.get("enabled") is False for event in observed_events),
+                                    "the active WebSocket must acknowledge the live enabled-to-disabled change")
                     await client.send(b"\x00\x00" * 512)
                     self.assertEqual(ignored["turn_id"], original_turn.turn_id)
                     self.assertIs(session.current_turn, original_turn)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import unittest
 
@@ -46,6 +47,29 @@ class LLMClientIntegrationTests(unittest.IsolatedAsyncioTestCase):
             _ = [event async for event in client.stream(
                 "a" * 32, "b" * 32, "test question", threading.Event()
             )]
+
+    async def test_client_receives_empty_generation_fallback_with_trace_id(self):
+        class EmptyProvider:
+            async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
+                if False:
+                    yield None
+
+        session_id, turn_id = "c" * 32, "d" * 32
+        service = LLMService(EmptyProvider(), mode="remote")
+        transport = httpx.ASGITransport(app=create_app(service))
+        client = LLMServiceClient("http://llm", transport=transport)
+        with self.assertLogs("el_voice.llm_client", level="INFO") as captured:
+            received = [event async for event in client.stream(
+                session_id, turn_id, "question", threading.Event()
+            )]
+        self.assertEqual([event["type"] for event in received], ["replace"])
+        self.assertEqual(received[0]["text"], "Я так качался")
+
+        events = [json.loads(record.getMessage()) for record in captured.records]
+        fallback = next(event for event in events
+                        if event["event"] == "llm_client_event_yielded"
+                        and event["event_type"] == "replace")
+        self.assertEqual(fallback["trace_id"], turn_id)
 
     async def test_consumer_cancellation_closes_owned_read_and_notifies_service(self):
         class BlockingStream(httpx.AsyncByteStream):

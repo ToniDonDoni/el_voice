@@ -173,6 +173,15 @@ class RemoteConfigurationTests(unittest.TestCase):
 
 
 class SearchToolTests(unittest.IsolatedAsyncioTestCase):
+    def test_search_limits_accept_the_requested_timeout_and_snippet_size(self):
+        with patch.dict(os.environ, {
+            "WEB_SEARCH_TIMEOUT_SECONDS": "21",
+            "WEB_SEARCH_MAX_SNIPPET_CHARS": "9999",
+        }):
+            search = WebSearch(backend="duckduckgo")
+        self.assertEqual(search.timeout_seconds, 21)
+        self.assertEqual(search.max_snippet_chars, 9999)
+
     def test_result_url_filter_blocks_private_targets(self):
         self.assertTrue(public_https_url("https://example.com/article"))
         self.assertFalse(public_https_url("http://example.com/article"))
@@ -193,6 +202,14 @@ class SearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(parsed["results"]), 5)
         self.assertLessEqual(len(payload), 6000)
         self.assertTrue(all(len(result["snippet"]) <= 500 for result in parsed["results"]))
+
+    async def test_large_configured_snippet_fits_the_bounded_tool_payload(self):
+        search = WebSearch(backend="duckduckgo", max_snippet_chars=9999)
+        async def results(_query):
+            return [{"title": "guide", "url": "https://example.com/guide", "snippet": "s" * 9999}]
+        search._run_worker = results
+        parsed = json.loads(await search.tool_payload("find the guide"))
+        self.assertEqual(len(parsed["results"][0]["snippet"]), 9999)
 
     async def test_search_timeouts_and_backend_configuration_are_explicit(self):
         search = WebSearch(backend="duckduckgo")
@@ -295,7 +312,7 @@ class StreamingContractTests(unittest.TestCase):
             self.assertEqual(client.delete(f"/v1/sessions/{session_id}").status_code, 204)
             self.assertNotIn(session_id, service.contexts.sessions)
 
-    def test_provider_failure_is_redacted_and_not_reported_as_success(self):
+    def test_provider_failure_replaces_partial_text_with_fallback(self):
         class FailingProvider:
             async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
                 yield {"type": "delta", "text": "partial"}
@@ -311,12 +328,55 @@ class StreamingContractTests(unittest.TestCase):
                 f"/v1/sessions/{session_id}/turns/{uuid.uuid4().hex}/stream", json={"text": "question"}
             )
             events = [json.loads(line) for line in response.iter_lines() if line]
-            self.assertEqual(events[-1]["type"], "error")
-            self.assertEqual(events[-1]["code"], "provider_rate_limited")
+            self.assertEqual([event["type"] for event in events], ["delta", "replace", "done"])
+            self.assertEqual(events[1]["text"], "Я так качался")
+            self.assertEqual(events[1]["fallback_reason"], "provider_rate_limited")
             self.assertNotIn("test-key", response.text)
-            self.assertEqual(service.contexts.sessions[session_id].history, [])
+            self.assertEqual(service.contexts.sessions[session_id].history[-1]["content"], "Я так качался")
 
-    def test_empty_provider_output_is_an_error_not_a_success(self):
+    def test_remote_provider_timeout_without_text_emits_configured_fallback(self):
+        class TimedOutProvider:
+            async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
+                raise RuntimeError("provider_timeout")
+                yield
+
+            async def close(self):
+                pass
+
+        service = LLMService(TimedOutProvider(), mode="remote")
+        session_id, turn_id = uuid.uuid4().hex, uuid.uuid4().hex
+        with TestClient(create_app(service)) as client:
+            response = client.post(
+                f"/v1/sessions/{session_id}/turns/{turn_id}/stream",
+                json={"text": "question"},
+            )
+        events = [json.loads(line) for line in response.iter_lines() if line]
+        self.assertEqual([event["type"] for event in events], ["replace", "done"])
+        self.assertEqual(events[0]["text"], "Я так качался")
+        self.assertEqual(events[0]["trace_id"], turn_id)
+
+    def test_remote_provider_timeout_after_partial_text_replaces_partial_answer(self):
+        class TimedOutProvider:
+            async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
+                yield {"type": "delta", "text": "partial"}
+                raise RuntimeError("provider_timeout")
+
+            async def close(self):
+                pass
+
+        service = LLMService(TimedOutProvider(), mode="remote")
+        session_id, turn_id = uuid.uuid4().hex, uuid.uuid4().hex
+        with TestClient(create_app(service)) as client:
+            response = client.post(
+                f"/v1/sessions/{session_id}/turns/{turn_id}/stream",
+                json={"text": "question"},
+            )
+        events = [json.loads(line) for line in response.iter_lines() if line]
+        self.assertEqual(events[0]["text"], "partial")
+        self.assertEqual([event["type"] for event in events], ["delta", "replace", "done"])
+        self.assertEqual(events[1]["text"], "Я так качался")
+
+    def test_empty_provider_output_emits_fallback_answer(self):
         class EmptyProvider:
             async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
                 if False:
@@ -326,16 +386,17 @@ class StreamingContractTests(unittest.TestCase):
                 pass
 
         service = LLMService(EmptyProvider(), mode="remote")
+        session_id, turn_id = uuid.uuid4().hex, uuid.uuid4().hex
         with TestClient(create_app(service)) as client:
             response = client.post(
-                f"/v1/sessions/{uuid.uuid4().hex}/turns/{uuid.uuid4().hex}/stream",
+                f"/v1/sessions/{session_id}/turns/{turn_id}/stream",
                 json={"text": "question"},
             )
         events = [json.loads(line) for line in response.iter_lines() if line]
-        self.assertEqual(events, [{
-            "type": "error", "code": "empty_generation",
-            "message": "The selected language provider returned no answer.",
-        }])
+        self.assertEqual([event["type"] for event in events], ["replace", "done"])
+        self.assertEqual(events[0]["text"], "Я так качался")
+        self.assertEqual(events[0]["trace_id"], turn_id)
+        self.assertIn("timestamp", events[0])
 
     def test_cancel_http_route_stops_work_and_discards_partial_history(self):
         class BlockingProvider:
@@ -434,7 +495,9 @@ class StreamingContractTests(unittest.TestCase):
 
         events = asyncio.run(consume())
         self.assertEqual(sum(event["type"] == "delta" for event in events), 20)
-        self.assertEqual(events[-1], {"type": "done"})
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertIn("timestamp", events[-1])
+        self.assertIn("trace_id", events[-1])
 
 
 if __name__ == "__main__":

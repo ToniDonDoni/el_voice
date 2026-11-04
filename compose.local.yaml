@@ -21,7 +21,7 @@ services:
       EL_VOICE_MODE: local
       EL_VOICE_LOCAL_MODEL: /models/llm/gemma-3-1b-it-Q4_K_M.gguf
       LLM_CONTEXT_TOKEN_BUDGET: "2400"
-      LLM_MAX_RESPONSE_TOKENS: "192"
+      LLM_MAX_RESPONSE_TOKENS: "9999"
       LLM_CPU_THREADS: "4"
     volumes:
       - ./workspace:/workspace:ro

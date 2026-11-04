@@ -51,6 +51,7 @@ def log_event(event: str, **fields: Any) -> None:
     log_structured(logger, event, **fields)
 
 ROOT = Path(__file__).resolve().parent
+GENERATION_FALLBACK = "Я так качался"
 runtime = VoiceRuntime()
 boot_task: asyncio.Task | None = None
 active_session: "VoiceSession | None" = None
@@ -181,6 +182,30 @@ def clear_outgoing(session: VoiceSession) -> None:
             return
 
 
+def clear_turn_outgoing(session: VoiceSession, turn_id: str) -> None:
+    retained: list[Outbound] = []
+    while True:
+        try:
+            message = session.outgoing.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        session.outgoing.task_done()
+        if message.turn_id != turn_id:
+            retained.append(message)
+    for message in retained:
+        session.outgoing.put_nowait(message)
+
+    session.browser_buffered_ms = 0.0
+    audio_capacity = getattr(session, "audio_capacity", None)
+    if audio_capacity is not None:
+        audio_capacity.set()
+    for name in ("audio_sequence", "audio_ack_sequence", "audio_ack_buffered_ms",
+                 "audio_ack_consumed_ms", "audio_sent_sequence", "audio_packet_durations"):
+        state = getattr(session, name, None)
+        if state is not None:
+            state.pop(turn_id, None)
+
+
 async def websocket_sender(session: VoiceSession) -> None:
     websocket = session.websocket
     while not session.stopped:
@@ -192,6 +217,13 @@ async def websocket_sender(session: VoiceSession) -> None:
                     continue
             if message.event:
                 await websocket.send_text(json.dumps(message.event, ensure_ascii=False))
+                event_type = message.event.get("type")
+                if event_type in {"text_delta", "response_replace", "response_audio_unavailable",
+                                  "tool_call", "sources", "turn_complete", "error", "turn_failed"}:
+                    text_value = message.event.get("text")
+                    log_event("voice_websocket_event_sent", session_id=session.session_id,
+                              turn_id=message.turn_id, event_type=event_type,
+                              text_chars=len(text_value) if isinstance(text_value, str) else 0)
             if message.audio:
                 if message.turn_id:
                     turn = session.turns.get(message.turn_id)
@@ -202,6 +234,10 @@ async def websocket_sender(session: VoiceSession) -> None:
                     sent_turn_id = message.audio[4:20].hex()
                     sent_sequence = struct.unpack_from(">I", message.audio, 20)[0]
                     session.audio_sent_sequence[sent_turn_id] = sent_sequence
+                    sample_rate = struct.unpack_from(">I", message.audio, 24)[0]
+                    log_event("voice_websocket_audio_sent", session_id=session.session_id,
+                              turn_id=sent_turn_id, sequence=sent_sequence,
+                              sample_rate=sample_rate, audio_bytes=len(message.audio) - 28)
         except (WebSocketDisconnect, RuntimeError):
             session.stopped = True
             return
@@ -318,6 +354,9 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
     answer_parts: list[str] = []
     transcript: str | None = None
     reply_logged = False
+    llm_delta_count = 0
+    llm_response_chars = 0
+    tts_chunk_count = 0
     try:
         stage = "stt"
         text = await asyncio.to_thread(runtime.transcribe, audio, turn.cancel_event)
@@ -338,6 +377,9 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         await queue_event(session, {"type": "generation_started", "turn_id": turn.turn_id}, turn.turn_id)
         text_buffer = ""
         stage = "llm"
+        log_event("voice_llm_stream_started", session_id=session.session_id,
+                  turn_id=turn.turn_id,
+                  client_managed=getattr(runtime, "llm_client", None) is not None)
         first_speech_chunk = True
         runtime_config = getattr(runtime, "config", {})
         speech_config = runtime_config.get("speech", {})
@@ -348,23 +390,61 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             if not session.is_current(turn):
                 return
             if delta.get("type") == "sources":
+                log_event("voice_llm_event_received", session_id=session.session_id,
+                          turn_id=turn.turn_id, event_type="sources",
+                          source_count=len(delta.get("sources", [])))
                 await queue_event(session, {
                     "type": "sources", "turn_id": turn.turn_id,
                     "sources": delta.get("sources", [])[:5],
                 }, turn.turn_id)
                 continue
             if delta.get("type") == "tool_call":
+                log_event("voice_llm_event_received", session_id=session.session_id,
+                          turn_id=turn.turn_id, event_type="tool_call",
+                          result_count=min(5, max(0, int(delta.get("result_count", 0)))))
                 await queue_event(session, {
                     "type": "tool_call", "turn_id": turn.turn_id,
                     "name": delta.get("name", "web_search"),
                     "result_count": min(5, max(0, int(delta.get("result_count", 0)))),
                 }, turn.turn_id)
                 continue
+            if delta.get("type") == "replace":
+                fallback = str(delta.get("text") or GENERATION_FALLBACK)[:500]
+                clear_turn_outgoing(session, turn.turn_id)
+                answer_parts.clear()
+                text_buffer = ""
+                llm_response_chars = len(fallback)
+                log_event("voice_turn_fallback_received", session_id=session.session_id,
+                          turn_id=turn.turn_id,
+                          fallback_reason=str(delta.get("fallback_reason", "generation_failed"))[:100],
+                          response_chars=len(fallback))
+                await queue_event(session, {
+                    "type": "response_replace", "turn_id": turn.turn_id, "text": fallback,
+                }, turn.turn_id)
+                answer_parts.append(fallback)
+                try:
+                    stage = "tts"
+                    tts_chunk_count += 1
+                    await synthesize_and_queue(session, turn, fallback)
+                except Exception as exc:
+                    log_event("fallback_tts_failed", session_id=session.session_id,
+                              turn_id=turn.turn_id, error=type(exc).__name__,
+                              detail=str(exc)[:300])
+                    await queue_event(session, {
+                        "type": "response_audio_unavailable", "turn_id": turn.turn_id,
+                    }, turn.turn_id)
+                stage = "llm"
+                continue
             if delta.get("type") != "delta":
                 continue
             delta_text = str(delta.get("text", ""))
             if not delta_text:
                 continue
+            llm_delta_count += 1
+            llm_response_chars += len(delta_text)
+            log_event("voice_llm_delta_received", session_id=session.session_id,
+                      turn_id=turn.turn_id, delta_index=llm_delta_count,
+                      text_chars=len(delta_text))
             answer_parts.append(delta_text)
             text_buffer += delta_text
             await queue_event(
@@ -379,15 +459,23 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
                 if not session.is_current(turn):
                     return
                 stage = "tts"
+                tts_chunk_count += 1
                 await synthesize_and_queue(session, turn, chunk)
                 first_speech_chunk = False
+                stage = "llm"
 
         if not session.is_current(turn):
             return
         final_chunk = _sanitize_speech(text_buffer)
         if final_chunk:
             stage = "tts"
+            tts_chunk_count += 1
             await synthesize_and_queue(session, turn, final_chunk)
+            stage = "llm"
+        log_event("voice_turn_completed", session_id=session.session_id,
+                  turn_id=turn.turn_id, llm_delta_count=llm_delta_count,
+                  llm_response_chars=llm_response_chars,
+                  tts_chunk_count=tts_chunk_count)
         answer = "".join(answer_parts).strip()
         if answer and session.is_current(turn):
             # The production LLM service owns context; legacy test runtimes use this fallback.
@@ -408,18 +496,43 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         raise
     except Exception as exc:
         log_event("turn_error", session_id=session.session_id, turn_id=turn.turn_id,
-                  stage=stage, error=type(exc).__name__, detail=str(exc)[:500] or repr(exc)[:500])
+                  stage=stage, error=type(exc).__name__, detail=str(exc)[:500] or repr(exc)[:500],
+                  llm_delta_count=llm_delta_count,
+                  llm_response_chars=llm_response_chars,
+                  tts_chunk_count=tts_chunk_count)
         if session.is_current(turn):
-            await queue_event(
-                session,
-                {"type": "error", "turn_id": turn.turn_id,
-                 "message": "The assistant could not complete this turn.",
-                 "code": getattr(exc, "code", type(exc).__name__)},
-                turn.turn_id,
-            )
-            await queue_event(
-                session, {"type": "turn_failed", "turn_id": turn.turn_id}, turn.turn_id
-            )
+            clear_turn_outgoing(session, turn.turn_id)
+            answer_parts[:] = [GENERATION_FALLBACK]
+            llm_response_chars = len(GENERATION_FALLBACK)
+            log_event("voice_turn_fallback_emitted", session_id=session.session_id,
+                      turn_id=turn.turn_id,
+                      fallback_reason=stage,
+                      response_chars=len(GENERATION_FALLBACK))
+            await queue_event(session, {
+                "type": "response_replace", "turn_id": turn.turn_id,
+                "text": GENERATION_FALLBACK,
+            }, turn.turn_id)
+            try:
+                tts_chunk_count += 1
+                await synthesize_and_queue(session, turn, GENERATION_FALLBACK)
+            except Exception as fallback_exc:
+                log_event("fallback_tts_failed", session_id=session.session_id,
+                          turn_id=turn.turn_id, error=type(fallback_exc).__name__,
+                          detail=str(fallback_exc)[:300])
+                await queue_event(session, {
+                    "type": "response_audio_unavailable", "turn_id": turn.turn_id,
+                }, turn.turn_id)
+            answer = GENERATION_FALLBACK
+            if getattr(runtime, "llm_client", None) is None:
+                session.history.extend([
+                    {"role": "user", "content": transcript or ""},
+                    {"role": "assistant", "content": answer},
+                ])
+                session.history = session.history[-8:]
+            log_event("assistant_reply", session_id=session.session_id,
+                      turn_id=turn.turn_id, text=answer, is_fallback=True)
+            reply_logged = True
+            await queue_event(session, {"type": "turn_complete", "turn_id": turn.turn_id}, turn.turn_id)
     finally:
         if answer_parts and not reply_logged and not session.is_current(turn):
             log_event("assistant_reply_interrupted", session_id=session.session_id, turn_id=turn.turn_id,
@@ -429,6 +542,8 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
 async def synthesize_and_queue(session: VoiceSession, turn: Turn, text: str) -> None:
     if not session.is_current(turn):
         return
+    log_event("tts_synthesis_started", session_id=session.session_id,
+              turn_id=turn.turn_id, characters=len(text))
     audio, sample_rate = await asyncio.to_thread(runtime.synthesize, text, turn.cancel_event)
     if not session.is_current(turn):
         return

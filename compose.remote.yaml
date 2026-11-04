@@ -19,11 +19,15 @@ services:
     environment:
       EL_VOICE_REVISION: ${EL_VOICE_REVISION:-unknown}
       EL_VOICE_MODE: remote
-      LLM_CONTEXT_TOKEN_BUDGET: "2400"
+      LLM_CONTEXT_TOKEN_BUDGET: "99999"
+      LLM_REMOTE_MAX_RESPONSE_TOKENS: "9999"
+      LLM_TOOL_ITERATIONS: "18"
       OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
       OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
       OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4.1-flash}
       WEB_SEARCH_BACKEND: ${WEB_SEARCH_BACKEND:-auto}
+      WEB_SEARCH_MAX_SNIPPET_CHARS: "9999"
+      WEB_SEARCH_TIMEOUT_SECONDS: "21"
       LANGCHAIN_TRACING_V2: "false"
       LANGSMITH_TRACING: "false"
     networks: [private, llm_egress]

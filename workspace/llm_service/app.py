@@ -27,6 +27,7 @@ if not logger.handlers:
 
 IDENTITY_RE = re.compile(r"^[0-9a-f]{32}$")
 MAX_USER_TEXT_CHARS = 8000
+GENERATION_FALLBACK = "Я так качался"
 
 
 class TurnRequest(BaseModel):
@@ -169,8 +170,11 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                 queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=12)
                 producer_finished = asyncio.Event()
                 reply_parts: list[str] = []
+                provider_event_count = 0
+                provider_delta_count = 0
 
                 async def produce() -> None:
+                    nonlocal provider_event_count, provider_delta_count
                     try:
                         history = current.contexts.trimmed_history(state.history)
                         provider_stream = current.provider.stream(
@@ -179,13 +183,20 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         )
                         async with aclosing(provider_stream):
                             async for event in provider_stream:
+                                provider_event_count += 1
                                 if cancelled.is_set():
                                     break
                                 event_type = event.get("type")
                                 if event_type == "delta":
                                     piece = str(event.get("text", ""))[:4000]
                                     if piece:
+                                        provider_delta_count += 1
                                         reply_parts.append(piece)
+                                        log_structured(logger, "llm_provider_delta_received",
+                                                       session_id=session_id, turn_id=turn_id,
+                                                       trace_id=trace_id,
+                                                       delta_index=provider_delta_count,
+                                                       text_chars=len(piece))
                                         await queue.put(("event", {"type": "delta", "text": piece}))
                                 elif event_type == "sources":
                                     sources = event.get("sources", [])
@@ -197,13 +208,23 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                             current.contexts.remember(state, request.text, "".join(reply_parts))
                             log_structured(logger, "llm_turn_completed", session_id=session_id,
                                            turn_id=turn_id, trace_id=trace_id,
-                                           response_chars=sum(map(len, reply_parts)))
+                                           provider_event_count=provider_event_count,
+                                           provider_delta_count=provider_delta_count,
+                                           response_chars=sum(map(len, reply_parts)),
+                                           provider_stream_ended_normally=True)
                             await queue.put(("event", {"type": "done"}))
                         elif not cancelled.is_set():
-                            log_structured(logger, "llm_turn_empty_generation", session_id=session_id,
-                                           turn_id=turn_id, trace_id=trace_id)
-                            await queue.put(("event", {"type": "error", "code": "empty_generation",
-                                                         "message": "The selected language provider returned no answer."}))
+                            current.contexts.remember(state, request.text, GENERATION_FALLBACK)
+                            log_structured(logger, "llm_turn_fallback_emitted", session_id=session_id,
+                                           turn_id=turn_id, trace_id=trace_id,
+                                           fallback_reason="empty_generation",
+                                           provider_event_count=provider_event_count,
+                                           provider_delta_count=provider_delta_count,
+                                           response_chars=len(GENERATION_FALLBACK),
+                                           provider_stream_ended_normally=True)
+                            await queue.put(("event", {"type": "replace", "text": GENERATION_FALLBACK,
+                                                         "fallback_reason": "empty_generation"}))
+                            await queue.put(("event", {"type": "done"}))
                     except asyncio.CancelledError:
                         cancelled.set()
                         log_structured(logger, "llm_turn_cancelled", session_id=session_id,
@@ -212,14 +233,33 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         code = safe_error_code(exc)
                         log_structured(logger, "llm_turn_failed", session_id=session_id,
                                        turn_id=turn_id, trace_id=trace_id,
-                                       mode=current.mode, error_code=code)
-                        await queue.put(("event", {"type": "error", "code": code,
-                                                     "message": "The selected language provider could not complete this turn."}))
+                                       mode=current.mode, error_code=code,
+                                       cancelled=cancelled.is_set(),
+                                       provider_event_count=provider_event_count,
+                                       provider_delta_count=provider_delta_count,
+                                       response_chars=sum(map(len, reply_parts)),
+                                       provider_stream_ended_normally=False)
+                        if cancelled.is_set():
+                            return
+                        current.contexts.remember(state, request.text, GENERATION_FALLBACK)
+                        log_structured(logger, "llm_turn_fallback_emitted",
+                                       session_id=session_id, turn_id=turn_id,
+                                       trace_id=trace_id, mode=current.mode,
+                                       fallback_reason=code, fallback="configured_phrase",
+                                       response_chars=len(GENERATION_FALLBACK),
+                                       provider_event_count=provider_event_count,
+                                       provider_delta_count=provider_delta_count,
+                                       provider_stream_ended_normally=False)
+                        await queue.put(("event", {"type": "replace", "text": GENERATION_FALLBACK,
+                                                     "fallback_reason": code}))
+                        await queue.put(("event", {"type": "done"}))
+                        return
                     finally:
                         producer_finished.set()
 
                 task = asyncio.create_task(produce(), name=f"llm-{session_id}-{turn_id}")
                 state.active_task = task
+                stream_event_index = 0
                 try:
                     while True:
                         try:
@@ -231,6 +271,13 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         event.setdefault("timestamp", utc_timestamp())
                         event["turn_id"] = turn_id
                         event["trace_id"] = trace_id
+                        stream_event_index += 1
+                        log_structured(logger, "llm_stream_event_sent", session_id=session_id,
+                                       turn_id=turn_id, trace_id=trace_id,
+                                       event_index=stream_event_index,
+                                       event_type=event.get("type"),
+                                       text_chars=len(event.get("text", ""))
+                                       if isinstance(event.get("text"), str) else 0)
                         yield (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
                     await task
                 finally:

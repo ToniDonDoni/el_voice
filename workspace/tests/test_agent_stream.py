@@ -8,7 +8,6 @@ import unittest
 from types import SimpleNamespace
 
 from llm_service.agent_stream import stream_agent
-from llm_service.search import SearchFailure
 
 
 def model(content="", calls=None, *, kind="ai"):
@@ -184,13 +183,109 @@ class AgentStreamContractTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "provider_tool_loop_failed"):
             await self.run_stream([text_delta("unsafe"), updated("model", model("unsafe"))])
 
-    async def test_reject_tool_failure_without_fake_sources(self):
+    async def test_failed_search_returns_status_and_still_allows_final_answer(self):
         error = SimpleNamespace(type="tool", name="web_search",
                                 tool_call_id="err", status="error",
                                 content="Error: search_timeout")
-        with self.assertRaises(SearchFailure) as raised:
-            await self.run_stream([updated("tools", error)])
-        self.assertEqual(raised.exception.code, "search_timeout")
+        events, observed, _ = await self.run_stream([
+            updated("model", model("", [
+                {"name": "web_search", "id": "err", "args": {"query": "latest"}},
+            ])),
+            updated("tools", error),
+            updated("model", model("", [commit_call()])),
+            updated("tools", commit_result()),
+            updated("model", model("I cannot verify the latest result.")),
+        ])
+        self.assertEqual([e["type"] for e in events],
+                         ["tool_call", "sources", "delta"])
+        self.assertEqual(events[1]["tool_call_id"], "err")
+        self.assertEqual(events[1]["sources"], [])
+        self.assertEqual(events[1]["status"], "error")
+        self.assertEqual(events[1]["error_code"], "search_timeout")
+        self.assertIn("cannot verify", events[-1]["text"])
+        failure_log = next(fields for name, fields in observed
+                           if name == "agent_tool_result")
+        self.assertEqual(failure_log["error_code"], "search_timeout")
+        self.assertEqual(failure_log["tool_call_id"], "err")
+
+    async def test_parallel_mixed_search_preserves_successful_sources(self):
+        source = {"title": "Confirmed", "url": "https://example.com/current",
+                  "snippet": "Evidence"}
+        search_calls = [
+            {"name": "web_search", "id": "call-good", "args": {"query": "good"}},
+            {"name": "web_search", "id": "call-bad", "args": {"query": "bad"}},
+        ]
+        bad = SimpleNamespace(
+            type="tool", name="web_search", tool_call_id="call-bad",
+            status="success", content=json.dumps({
+                "results": [], "error": "search_unavailable",
+            }),
+        )
+        for tool_messages in [
+            [tool_result("call-good", [source]), bad],
+            [bad, tool_result("call-good", [source])],
+        ]:
+            with self.subTest(order=[t.tool_call_id for t in tool_messages]):
+                events, observed, _ = await self.run_stream([
+                    updated("model", model("", search_calls)),
+                    ("updates", {"tools": {"messages": tool_messages}}),
+                    updated("model", model("", [commit_call()])),
+                    updated("tools", commit_result()),
+                    text_delta("Based on the confirmed result."),
+                    updated("model", model("Based on the confirmed result.")),
+                ])
+                self.assertEqual([e["type"] for e in events],
+                                 ["tool_call", "tool_call", "sources", "sources", "delta"])
+                statuses = {e["tool_call_id"]: e for e in events
+                            if e["type"] == "sources"}
+                self.assertEqual(statuses["call-good"]["status"], "success")
+                self.assertEqual(statuses["call-bad"]["status"], "error")
+                self.assertEqual(statuses["call-bad"]["error_code"],
+                                 "search_unavailable")
+                self.assertEqual([x["url"] for x in events[-2]["sources"]],
+                                 ["https://example.com/current"])
+                self.assertEqual([e["tool_call_id"] for e in events[:2]],
+                                 ["call-good", "call-bad"])
+                observed_results = {fields["tool_call_id"]: fields
+                                    for name, fields in observed
+                                    if name == "agent_tool_result"}
+                self.assertEqual(observed_results["call-good"]["status"], "success")
+                self.assertEqual(observed_results["call-bad"]["status"], "error")
+                self.assertEqual(observed_results["call-bad"]["error_code"],
+                                 "search_unavailable")
+                self.assertEqual(events[-1]["text"],
+                                 "Based on the confirmed result.")
+
+    async def test_all_failed_searches_preserve_error_codes_and_allow_disclosure(self):
+        errors = [
+            SimpleNamespace(
+                type="tool", name="web_search", tool_call_id="one",
+                status="success", content=json.dumps({
+                    "results": [], "error": "search_timeout",
+                }),
+            ),
+            SimpleNamespace(
+                type="tool", name="web_search", tool_call_id="two",
+                status="success", content=json.dumps({
+                    "results": [], "error": "search_rate_limited",
+                }),
+            ),
+        ]
+        events, _, _ = await self.run_stream([
+            updated("model", model("", [
+                {"name": "web_search", "id": "one", "args": {"query": "one"}},
+                {"name": "web_search", "id": "two", "args": {"query": "two"}},
+            ])),
+            ("updates", {"tools": {"messages": errors}}),
+            updated("model", model("", [commit_call()])),
+            updated("tools", commit_result()),
+            updated("model", model("I could not verify current facts.")),
+        ])
+        failures = [e for e in events if e["type"] == "sources"]
+        self.assertEqual([e["error_code"] for e in failures],
+                         ["search_timeout", "search_rate_limited"])
+        self.assertTrue(all(e["sources"] == [] for e in failures))
+        self.assertIn("could not verify", events[-1]["text"])
 
     async def test_iteration_limit_is_hard(self):
         calls = [

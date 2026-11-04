@@ -23,11 +23,11 @@
 
 ## Current milestone
 
-The current task is environment preparation only. The user will build and start the container.
-`workspace/app.py` is an explicit bootstrap status page, not a voice conversation implementation.
-After the user starts the image, implement and test browser microphone input, local STT,
-local LLM inference, audio responses, and interruption. Keep the installed dependencies in
-the image and edit mounted source files so routine application changes need no image rebuild.
+The browser conversation pipeline is implemented in the mounted `workspace/` source and runs
+in the prepared image. It uses bundled Silero ONNX VAD, local Whisper, Gemma, and Silero `b_lez`.
+Local stdout logs include recognized text, assistant replies, and diagnostic errors at the user's
+request; audio payloads must never be logged or persisted. Continue verifying browser playback,
+barge-in, and latency acceptance scenarios without rebuilding unless dependencies change.
 
 ## Container contract
 
@@ -46,7 +46,7 @@ the image and edit mounted source files so routine application changes need no i
 ## Verification
 
 - Validate the Compose configuration before handing it over.
-- Run Python syntax checks and the bootstrap HTTP smoke check when practical.
+- Run Python syntax checks, Compose validation, `/healthz` and `/api/status` smoke checks when practical.
 - A successful health check means only that the HTTP process is alive.
 - Do not report a tested container build, working model, microphone, or conversation unless tested.
 - At the next milestone, run `tools/check_environment.py` in the real container, verify the

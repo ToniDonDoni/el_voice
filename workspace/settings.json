@@ -4,5 +4,29 @@
     "speaker": "b_lez",
     "sample_rate": 24000,
     "cpu_threads": 4
+  },
+  "stt": {
+    "model": "stt/small",
+    "language": "ru",
+    "cpu_threads": 4
+  },
+  "llm": {
+    "model": "llm/gemma-3-1b-it-Q4_K_M.gguf",
+    "context_tokens": 3072,
+    "cpu_threads": 4,
+    "batch_tokens": 256,
+    "max_response_tokens": 192
+  },
+  "vad": {
+    "implementation": "faster-whisper bundled Silero VAD v6 ONNX",
+    "sample_rate": 16000,
+    "frame_samples": 512,
+    "threshold": 0.55,
+    "negative_threshold": 0.35,
+    "start_frames": 3,
+    "end_silence_ms": 640,
+    "min_speech_ms": 240,
+    "pre_roll_ms": 320,
+    "max_utterance_seconds": 45
   }
 }

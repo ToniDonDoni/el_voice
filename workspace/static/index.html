@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>EL Voice — Dota companion</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="EL Voice home"><span class="brand-mark">EL</span><span>EL Voice</span></a>
+      <span class="local-tag"><span class="local-dot"></span>LOCAL · PRIVATE</span>
+    </header>
+
+    <section class="hero" aria-labelledby="title">
+      <div class="eyebrow">YOUR LOCAL DOTA COMPANION</div>
+      <h1 id="title">Talk strategy.<br><span>Keep it local.</span></h1>
+      <p class="intro">Ask about heroes, builds, matchups, and game concepts. Speak naturally; interrupt the reply whenever you like.</p>
+    </section>
+
+    <section class="panel" aria-label="Voice conversation">
+      <div class="panel-head">
+        <div class="connection"><span id="status-dot" class="status-dot"></span><span id="status-label">Checking local models…</span></div>
+        <button id="clear-button" class="text-button" type="button" disabled>Clear chat</button>
+      </div>
+      <div id="messages" class="messages" aria-live="polite" aria-relevant="additions text">
+        <div class="welcome" id="welcome">
+          <div class="welcome-icon">✳</div>
+          <p>Start a session and ask your first question.</p>
+          <span>For voice output, connect headphones.</span>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="start-button" class="primary-button" type="button" disabled>
+          <span class="mic-icon" aria-hidden="true">●</span><span>Start talking</span>
+        </button>
+        <button id="stop-button" class="stop-button" type="button" hidden>End session</button>
+        <div class="vad-indicator" id="vad-indicator"><span></span><span></span><span></span><span></span><span></span></div>
+        <span class="live-label" id="live-label">MIC OFF</span>
+      </div>
+    </section>
+
+    <aside class="headphone-note" role="note">
+      <span class="note-icon">⌁</span>
+      <p><strong>Use headphones for this version.</strong> Browser echo cancellation is best effort; speakers can make the assistant hear its own voice.</p>
+    </aside>
+
+    <details class="diagnostics">
+      <summary>Local system status</summary>
+      <div id="diagnostics-content" class="diagnostics-content">Loading status…</div>
+    </details>
+
+    <footer>Runs on your Mac · CPU inference in Docker · No cloud audio</footer>
+  </main>
+</body>
+</html>

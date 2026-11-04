@@ -33,11 +33,19 @@ jobs:
           python -m pip check
       - name: Syntax check
         run: python -m compileall -q workspace
-      - name: Run all deterministic Python tests without models or API keys
+      - name: Run model-free Python contract tests (exclude model-asset integration)
         env:
           PYTHONPATH: workspace
           OPENCODE_GO_API_KEY: ''
-        run: python -m unittest discover -s workspace/tests -p 'test_*.py' -v
+        run: |
+          cd workspace
+          python -m unittest -v \
+            tests.test_agent_stream \
+            tests.test_langchain_provider \
+            tests.test_llm_client \
+            tests.test_llm_service_stream_cleanup \
+            tests.test_remote_provider_request_headers \
+            tests.test_remote_voice
 
   browser-contracts:
     name: Browser JavaScript contracts

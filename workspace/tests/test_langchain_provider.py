@@ -123,7 +123,8 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
             model.release.set()
             remaining = [event async for event in generator]
             self.assertEqual(remaining, [{"type": "delta", "text": " reply"}])
-            self.assertIn((0, "none"), model.bound_tool_counts)
+            self.assertEqual(model.bound_tool_counts, [(2, "required")],
+                             "Final request must invoke the unbound model without tools")
         finally:
             model.release.set()
             await generator.aclose()

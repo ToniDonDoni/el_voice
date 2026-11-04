@@ -7,9 +7,9 @@ Evidence report: [Implementation report](SPEC-001-LOCAL-VOICE-CONVERSATION-IMPLE
 
 ## Scope
 
-Continue the Luna implementation on `codex/local-voice`. Reuse selected ideas from
-`DeepSeek-Flash` after adapting and checking them. Keep the current local models,
-Docker deployment, conversation context, and working microphone capture.
+Complete the current implementation in this repository on `codex/local-voice`.
+Keep the current local models, Docker deployment, conversation context, and working
+microphone capture. Implement the corrections and checks described below.
 The original specification and its acceptance criteria remain unchanged. Record
 unverified or failing criteria in the implementation report.
 
@@ -30,7 +30,7 @@ unverified or failing criteria in the implementation report.
   duration, with an explicit configurable limit. Interruption, stop, and disconnect
   must clear pending playback and reject all stale turn results.
 
-## P1: Improvements to adapt from DeepSeek
+## P1: Required improvements
 
 - [ ] Add speech-text sanitization and configurable incremental chunking, including
   a short first chunk. Handle Markdown, URLs, emoji, punctuation, and long phrases
@@ -47,19 +47,18 @@ unverified or failing criteria in the implementation report.
 - [ ] Separate session orchestration, model inference, and configuration where it
   makes these fixes easier to maintain; avoid an unrelated application rewrite.
 
-## Import safeguards
+## Regression checks
 
-The comparison found the following issues in DeepSeek. Do not introduce them when
-adapting its components:
-
-- At 44.1 kHz, its worklet produced 14,700 samples per input second instead of
-  16,000. Its fallback capture also drops input after returning the first frame.
-- Session turn counters restart at one while browser message maps retain old IDs.
-- Its Silero v5.1.2 wrapper omits the preceding 64-sample input context used by the
-  upstream wrapper. Keep the working bundled VAD unless a replacement is justified.
-- WebSocket closure does not immediately flush scheduled playback.
-- Each model request omits previous conversation turns; preserve Luna's history.
-- The LLM token queue is unbounded; preserve bounded queues.
+- [ ] Verify that 44.1 kHz and 48 kHz input both produce 16,000 output samples per
+  input second, allowing for buffered frame tails. Every supported capture path
+  must consume all input samples across callbacks.
+- [ ] Verify that stop/start and reconnect cannot reuse message identities or append
+  new replies to messages from a previous session.
+- [ ] Preserve the selected VAD model's required input context and recurrent state;
+  validate the wrapper against the bundled model interface.
+- [ ] Verify that WebSocket closure immediately clears scheduled playback.
+- [ ] Preserve in-session conversation history and test a contextual follow-up.
+- [ ] Keep LLM token and audio queues bounded under a slow or stalled consumer.
 
 ## Acceptance evidence still required
 
@@ -76,14 +75,17 @@ adapting its components:
   as unmet while those logs are enabled. Never log or persist conversation audio.
 - [ ] Update `SPEC-001-LOCAL-VOICE-CONVERSATION-IMPLEMENTATION-REPORT.md` with
   commands, outcomes, remaining failures, and a status for every original acceptance
-  criterion. Mark acceptance complete
-  only after observation; an automated WebSocket test is not a microphone or
-  physical audio-output test.
+  criterion. Mark acceptance complete only after observation; an automated WebSocket
+  test is not a microphone or physical audio-output test.
 
 ## Review evidence
 
-Code from both working trees was compared; acceptance criteria, Dockerfile,
-Compose, Nginx configuration, and dependency files were identical. Short isolated
-checks reproduced the resampling discrepancy, repeated DeepSeek session IDs, and
-Luna's blocked producer after stop. Full browser acceptance and a controlled
-performance comparison were not rerun. Neither implementation is fully accepted.
+The teardown finding comes from `workspace/app.py`: disconnect cleanup waits for
+turn tasks before cancelling the sender, while a producer can remain blocked on
+its outgoing queue. An isolated check reproduced a producer still waiting after
+the session was marked stopped. The current model calls, buffering, settings, and
+speech-text handling were also inspected in `workspace/app.py`,
+`workspace/voice_pipeline.py`, and `workspace/static/app.js`.
+
+Full browser acceptance was not rerun during this review. Record actual results
+and remaining limitations in the linked implementation report.

@@ -179,7 +179,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["id"] for item in paired[0].tool_calls], ["matched"])
         self.assertEqual(paired[1].tool_call_id, "matched")
 
-    def test_search_rate_limit_survives_real_agent_and_service_error_mapping(self):
+    def test_search_rate_limit_becomes_a_tool_result_and_allows_final_disclosure(self):
         class Model(FakeMessagesListChatModel):
             def bind_tools(self, _tools, **_kwargs):
                 return self
@@ -193,7 +193,10 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
             AIMessage(content="", tool_calls=[{
                 "id": "call-search", "name": "web_search", "args": {"query": "latest patch"}
             }]),
-            AIMessage(content="Search failed"),
+            AIMessage(content="", tool_calls=[{
+                "id": "call-final", "name": "begin_final_answer", "args": {}
+            }]),
+            AIMessage(content="I cannot verify the latest patch."),
         ])
         provider.search_tool = make_langchain_search_tool(Search())
         provider.tool_iterations = 3
@@ -208,7 +211,80 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
                 json={"text": "latest Dota patch"},
             )
         events = [json.loads(line) for line in response.iter_lines() if line]
-        fallback = next(event for event in events if event["type"] == "replace")
-        self.assertEqual(fallback["fallback_reason"], "search_rate_limited")
-        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual([event["type"] for event in events],
+                         ["tool_call", "sources", "delta", "done"])
+        self.assertEqual(events[1]["status"], "error")
+        self.assertEqual(events[1]["error_code"], "search_rate_limited")
+        self.assertEqual(events[1]["sources"], [])
+        self.assertEqual(events[1]["tool_call_id"], "call-search")
+        self.assertIn("cannot verify", events[2]["text"])
         self.assertNotIn("OPENCODE_GO_API_KEY", response.text)
+
+    def test_parallel_real_agent_keeps_success_when_other_search_fails(self):
+        class Model(FakeMessagesListChatModel):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                object.__setattr__(self, "seen", [])
+
+            def bind_tools(self, _tools, **_kwargs):
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                self.seen.append(messages)
+                return super()._generate(messages, stop, run_manager, **kwargs)
+
+        class Search(WebSearch):
+            async def tool_payload(self, query):
+                if query == "good":
+                    return json.dumps({"query": query, "results": [{
+                        "title": "Evidence", "url": "https://example.com/evidence",
+                        "snippet": "Verified fact",
+                    }]})
+                raise SearchFailure("search_unavailable")
+
+        model = Model(responses=[
+            AIMessage(content="", tool_calls=[
+                {"id": "good", "name": "web_search", "args": {"query": "good"}},
+                {"id": "bad", "name": "web_search", "args": {"query": "bad"}},
+            ]),
+            AIMessage(content="", tool_calls=[{
+                "id": "final", "name": "begin_final_answer", "args": {},
+            }]),
+            AIMessage(content="The available source confirms the result."),
+        ])
+        provider = object.__new__(OpenCodeLangChainProvider)
+        provider.model = model
+        provider.search_tool = make_langchain_search_tool(Search())
+        provider.tool_iterations = 4
+        class HTTPClient:
+            async def aclose(self):
+                pass
+        provider.http_async_client = HTTPClient()
+        app = create_app(LLMService(provider, mode="remote"))
+        with TestClient(app) as client:
+            response = client.post(
+                f"/v1/sessions/{'a' * 32}/turns/{'b' * 32}/stream",
+                json={"text": "Check two pieces of information"},
+            )
+        events = [json.loads(line) for line in response.iter_lines() if line]
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertNotIn("replace", [item["type"] for item in events])
+        self.assertEqual([item["tool_call_id"] for item in events
+                          if item["type"] == "tool_call"], ["good", "bad"])
+        result_events = [item for item in events if item["type"] == "sources"]
+        self.assertEqual(len(result_events), 2)
+        by_id = {item["tool_call_id"]: item for item in result_events}
+        self.assertEqual(by_id["good"]["status"], "success")
+        self.assertEqual(by_id["bad"]["status"], "error")
+        self.assertEqual(by_id["bad"]["error_code"], "search_unavailable")
+        self.assertTrue(all(item["sources"] and
+                            item["sources"][0]["title"] == "Evidence"
+                            for item in result_events[-1:]))
+        self.assertIn("confirms", "".join(item.get("text", "") for item in events
+                                          if item["type"] == "delta"))
+        messages = [message for turn in model.seen for message in turn
+                    if isinstance(message, ToolMessage)]
+        paired = {message.tool_call_id: json.loads(message.content)
+                  for message in messages if message.tool_call_id in {"good", "bad"}}
+        self.assertEqual(paired["good"]["results"][0]["title"], "Evidence")
+        self.assertEqual(paired["bad"]["error"], "search_unavailable")

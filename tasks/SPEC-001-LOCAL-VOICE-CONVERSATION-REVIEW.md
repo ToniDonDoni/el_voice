@@ -3,7 +3,7 @@
 Status: Changes requested.
 
 Parent task: [Local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
-Evidence report: [Implementation report](IMPLEMENTATION-REPORT.md).
+Evidence report: [Implementation report](SPEC-001-LOCAL-VOICE-CONVERSATION-IMPLEMENTATION-REPORT.md).
 
 ## Scope
 
@@ -74,8 +74,9 @@ adapting its components:
 - [ ] Inspect runtime storage and logs. The user requested transcript/reply logging;
   this conflicts with the unchanged no-content-logs criterion. Report that criterion
   as unmet while those logs are enabled. Never log or persist conversation audio.
-- [ ] Update `IMPLEMENTATION-REPORT.md` with commands, outcomes, remaining failures,
-  and a status for every original acceptance criterion. Mark acceptance complete
+- [ ] Update `SPEC-001-LOCAL-VOICE-CONVERSATION-IMPLEMENTATION-REPORT.md` with
+  commands, outcomes, remaining failures, and a status for every original acceptance
+  criterion. Mark acceptance complete
   only after observation; an automated WebSocket test is not a microphone or
   physical audio-output test.
 

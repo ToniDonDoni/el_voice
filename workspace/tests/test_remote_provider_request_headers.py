@@ -159,6 +159,10 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         tool_events = [event for event in log_events if event["event"] == "agent_tool_result"]
         self.assertEqual(len(tool_events), 1)
         self.assertEqual(tool_events[0]["tool_call_id"], "call-search")
+        invocations = [event for event in log_events if event["event"] == "tool_call_started"]
+        self.assertEqual(len(invocations), 1)
+        self.assertEqual(invocations[0]["tool_call_id"], "call-search")
+        self.assertEqual(invocations[0]["trace_id"], "4" * 32)
         self.assertEqual(tool_events[0]["result_count"], 1)
         self.assertEqual(tool_events[0]["trace_id"], "4" * 32)
         self.assertEqual(tool_events[0]["turn_id"], "4" * 32)

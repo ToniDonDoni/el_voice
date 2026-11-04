@@ -365,6 +365,8 @@ class VoiceSession:
                         sequence = await self._speak(turn, chunk, sequence)
                 elif kind == "sources":
                     sources = event.get("sources")
+                    logger.info("turn=%s: sources received count=%s", turn.id,
+                                len(sources) if isinstance(sources, list) else 0)
                     if isinstance(sources, list):
                         await self._send_json({
                             "type": "assistant_sources",

@@ -128,7 +128,9 @@ provides a search API or that hosted search is built into this model.
   edits retain the mounted-source workflow.
 - [ ] **Focused checks:** Verify the service contract, context trimming, tool-call
   assembly, stream errors, cancellation, session isolation, and both Compose
-  configurations with reproducible checks. Use deterministic provider/search fakes
+  configurations with reproducible checks. Verify that every event of one answer
+  (provider calls, tool decisions, searches, sources, final answer) is logged under
+  the same session/turn/request ids, while audio and transcript text stay out of logs. Use deterministic provider/search fakes
   for failure paths; identify them separately from live integrations.
 - [ ] **Live browser acceptance:** On the target Mac, test at least 10 representative
   remote turns including search and follow-ups; measure response latency separately

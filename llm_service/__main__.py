@@ -7,6 +7,7 @@ import logging
 from dataclasses import replace
 
 from .config import load_config
+from .log_context import configure_logging
 from .server import create_app
 
 
@@ -16,10 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     config = load_config()
     if args.host:
         config = replace(config, host=args.host)
@@ -34,6 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         port=config.port,
         log_level="info",
         access_log=False,
+        log_config=None,
     )
     return 0
 

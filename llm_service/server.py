@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 
@@ -26,6 +27,7 @@ from starlette.websockets import WebSocketState
 
 from .backends.base import Backend, BackendError
 from .config import ServiceConfig, load_config, workspace_dir
+from .log_context import bind as bind_log_context, log_event, reset as reset_log_context
 
 # ``python -m llm_service`` must work without an externally configured
 # PYTHONPATH; the workspace settings module is imported from the mounted source.
@@ -46,6 +48,7 @@ class ConnectionState:
     history: ConversationHistory
     websocket: WebSocket
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    request_id: str = "-"
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     cancel: threading.Event | None = None
@@ -163,7 +166,8 @@ def create_app(backend: Backend | None = None, config: ServiceConfig | None = No
             history=ConversationHistory(config.history_turns),
             websocket=websocket,
         )
-        logger.info("ws: connection opened (active=%d)", state.active_sessions)
+        session_token = bind_log_context(session=conn.session_id)
+        log_event(logger, "connection_opened", active_sessions=state.active_sessions)
         try:
             while True:
                 message = await websocket.receive()
@@ -202,11 +206,12 @@ def create_app(backend: Backend | None = None, config: ServiceConfig | None = No
         finally:
             await _stop_active(conn)
             conn.history.reset()
+            reset_log_context(session_token)
             release = getattr(state.backend, "release_session", None)
             if callable(release):
                 release(conn.session_id)
             state.active_sessions = max(0, state.active_sessions - 1)
-            logger.info("ws: connection closed (active=%d)", state.active_sessions)
+            log_event(logger, "connection_closed", active_sessions=state.active_sessions)
 
     return app
 
@@ -258,6 +263,7 @@ async def _handle_generate(
     cancel = threading.Event()
     conn.cancel = cancel
     conn.turn_id = turn_id
+    conn.request_id = uuid.uuid4().hex[:8]
     conn.answer = []
     conn.task = asyncio.create_task(
         _run_generation(state, conn, turn_id, text.strip(), cancel)
@@ -314,6 +320,8 @@ async def _run_generation(
     text: str,
     cancel: threading.Event,
 ) -> None:
+    request_token = bind_log_context(turn=turn_id, request=conn.request_id)
+    started = time.monotonic()
     pump: asyncio.Task | None = None
     cancelled_sent = False
     assistant: list[str] = []
@@ -333,6 +341,8 @@ async def _run_generation(
             state.config.max_prompt_chars,
         )
         state.last_prompt = dict(stats)
+        log_event(logger, "generate_start", chars=len(text), history_turns=stats["history_turns"],
+                  prompt_chars=stats["chars"])
         await _send(conn, {"type": "start", "turn_id": turn_id, "prompt": stats})
 
         iterator = state.backend.stream(messages, cancel)
@@ -376,11 +386,14 @@ async def _run_generation(
                 logger.warning("backend produced an unknown event type: %r", kind)
 
         if cancel.is_set():
+            log_event(logger, "generate_cancelled", duration_ms=round((time.monotonic() - started) * 1000))
             await _send(conn, {"type": "cancelled", "turn_id": turn_id})
             cancelled_sent = True
             return
 
         answer = "".join(assistant)
+        log_event(logger, "generate_done", chars=len(answer),
+                  duration_ms=round((time.monotonic() - started) * 1000))
         if answer.strip():
             conn.history.add_exchange(text, answer)
         await _send(conn, {
@@ -392,7 +405,8 @@ async def _run_generation(
                 await asyncio.shield(_send(conn, {"type": "cancelled", "turn_id": turn_id}))
         raise
     except BackendError as exc:
-        logger.error("generation failed: %s", exc.code)
+        log_event(logger, "generate_error", level=logging.ERROR, code=exc.code,
+                  duration_ms=round((time.monotonic() - started) * 1000))
         if cancel.is_set():
             await _send(conn, {"type": "cancelled", "turn_id": turn_id})
         else:
@@ -401,7 +415,9 @@ async def _run_generation(
                 "message": exc.message, "retryable": exc.retryable,
             })
     except Exception as exc:  # noqa: BLE001 - never crash the connection
-        logger.error("generation failed: %s", type(exc).__name__)
+        log_event(logger, "generate_error", level=logging.ERROR, code="internal_error",
+                  detail=type(exc).__name__,
+                  duration_ms=round((time.monotonic() - started) * 1000))
         if cancel.is_set():
             await _send(conn, {"type": "cancelled", "turn_id": turn_id})
         else:
@@ -418,4 +434,6 @@ async def _run_generation(
         if conn.task is asyncio.current_task():
             conn.task = None
             conn.cancel = None
+            conn.request_id = "-"
             conn.turn_id = None
+        reset_log_context(request_token)

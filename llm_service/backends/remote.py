@@ -18,9 +18,11 @@ import json
 import logging
 import re
 import threading
+import time
 from typing import AsyncIterator
 
 from ..config import ServiceConfig
+from ..log_context import log_event
 from .base import BackendError
 from .search import SEARCH_TOOL_NAME, build_web_search_tool, ddg_search, normalize_sources
 
@@ -215,14 +217,19 @@ class RemoteBackend:
 
         for iteration in range(1, self._config.max_iterations + 1):
             if cancel.is_set():
+                log_event(logger, "generation_cancelled", iteration=iteration)
                 return
+            iteration_started = time.monotonic()
             full = None
             pending: str | None = None
             tool_requested = False
             try:
+                chunk_count = 0
                 async for chunk in model_with_tools.astream(conversation):
                     if cancel.is_set():
+                        log_event(logger, "generation_cancelled", iteration=iteration)
                         return
+                    chunk_count += 1
                     full = chunk if full is None else full + chunk
                     if getattr(chunk, "tool_call_chunks", None) or getattr(
                         chunk, "tool_calls", None
@@ -243,10 +250,14 @@ class RemoteBackend:
             except Exception as exc:  # noqa: BLE001 - mapped to a redacted error
                 raise self._map_error(exc) from exc
 
+            log_event(logger, "provider_response", iteration=iteration,
+                      duration_ms=round((time.monotonic() - iteration_started) * 1000),
+                      chunks=chunk_count, tool_call=tool_requested)
             if not tool_requested:
                 if pending:
                     yield {"type": "delta", "text": pending}
                 self._provider_checked = True
+                log_event(logger, "answer_done", iterations=iteration)
                 return
 
             calls = list(getattr(full, "tool_calls", None) or [])
@@ -294,6 +305,7 @@ class RemoteBackend:
                         retryable=True,
                     )
                 query = " ".join(query.split())[:300]
+                log_event(logger, "tool_call", name=SEARCH_TOOL_NAME, query=query)
                 yield {"type": "tool", "name": SEARCH_TOOL_NAME, "query": query}
 
                 if tool_budget <= 0:
@@ -304,6 +316,9 @@ class RemoteBackend:
                     continue
                 tool_budget -= 1
 
+                search_started = time.monotonic()
+                log_event(logger, "search_start", provider=self._config.search_provider,
+                          query=query, max_results=self._config.max_search_results)
                 try:
                     raw_sources = await self._search(
                         query,
@@ -331,6 +346,10 @@ class RemoteBackend:
                     self._config.max_search_results,
                     self._config.search_snippet_chars,
                 )
+                log_event(logger, "search_done", count=len(sources),
+                          duration_ms=round((time.monotonic() - search_started) * 1000))
+                log_event(logger, "sources_emitted", count=len(sources),
+                          urls=" | ".join(item.get("url", "") for item in sources[:5])[:600])
                 yield {"type": "sources", "sources": sources}
                 conversation.append(ToolMessage(
                     content=json.dumps(

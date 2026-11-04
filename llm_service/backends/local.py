@@ -16,6 +16,7 @@ import threading
 import time
 
 from ..config import ServiceConfig
+from ..log_context import log_event
 from .base import BackendError
 
 logger = logging.getLogger("llm_service.local")

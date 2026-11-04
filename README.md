@@ -478,6 +478,26 @@ ordinary Dota conversation need not search. The configured backend is `ddgs`; re
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
+## Correlated diagnostic logs
+
+Every answer is traced across both services by three ids: the WebSocket session
+(`session`), the voice `turn` id and a short per-generation `request` id. Log lines look
+like:
+
+```text
+INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=tool_call name=web_search query=Dota 2 патч 7.41
+INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=search_done count=5 duration_ms=4510
+INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=sources_emitted count=5 urls=…
+INFO llm_service.server [session=2136…5a5d turn=7 req=9c6f327f] event=generate_done chars=259 duration_ms=13657
+```
+
+Provider HTTP calls, tool decisions, search queries/results, emitted sources and the final
+answer share the same `turn` and `request` ids, so one answer can be reconstructed end to
+end. This is explicit local diagnostic logging that includes search queries and result URLs;
+it does not log the user's transcript, assistant answer text or microphone audio beyond the
+content-free `chars` counters. Turn off or redact at the log collector if search queries are
+sensitive.
+
 ## Deployed commit badge
 
 The page shows the running commit in the bottom-left corner. The voice container does not

@@ -1,0 +1,55 @@
+# Local Voice: offline Gemma runs in the internal LLM service.
+# Start:  docker compose -f compose.yaml -f compose.local.yaml up -d --build
+# Stop:   docker compose -f compose.yaml -f compose.local.yaml down
+#
+# The voice and LLM services share the internal `private` network, which has no
+# outbound route. Only the loopback-bound Nginx proxy publishes a host port.
+
+services:
+  voice:
+    environment:
+      EL_VOICE_LLM_URL: ws://llm:8100
+      # Makes the in-process end-to-end self-test able to import llm_service.
+      PYTHONPATH: /opt/llm-service:/workspace
+    depends_on:
+      llm:
+        condition: service_healthy
+
+  llm:
+    image: el-voice:dev
+    platform: linux/arm64
+    user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    init: true
+    command: [python, -m, llm_service]
+    environment:
+      EL_VOICE_LLM_MODE: local
+      EL_VOICE_LLM_HOST: 0.0.0.0
+      EL_VOICE_LLM_PORT: "8100"
+      EL_VOICE_MODELS: /models
+      EL_VOICE_WORKSPACE: /workspace
+      EL_VOICE_SETTINGS: /workspace/settings.json
+      PYTHONPATH: /opt/llm-service:/workspace
+    volumes:
+      - ./workspace:/workspace:ro
+      - ./llm_service:/opt/llm-service/llm_service:ro
+      - ./models:/models:ro
+    networks: [private]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 4
+    mem_limit: 8g
+    pids_limit: 128
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3).read()
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 150s

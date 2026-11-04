@@ -1,0 +1,66 @@
+# Remote Voice: LangChain agent calls OpenCode Go and DuckDuckGo.
+# Prepare a local, ignored .env with OPENCODE_GO_API_KEY=... then:
+# Start:  docker compose -f compose.yaml -f compose.remote.yaml up -d --build
+# Stop:   docker compose -f compose.yaml -f compose.remote.yaml down
+#
+# Only this `llm` service joins the egress `provider` network and only it gets
+# the provider key. The voice service remains on the internal `private` network
+# and never receives the key. No Gemma weights are mounted in this mode.
+
+services:
+  voice:
+    environment:
+      EL_VOICE_LLM_URL: ws://llm:8100
+      # Makes the in-process end-to-end self-test able to import llm_service.
+      PYTHONPATH: /opt/llm-service:/workspace
+    depends_on:
+      llm:
+        condition: service_healthy
+
+  llm:
+    image: el-voice:dev
+    platform: linux/arm64
+    user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    init: true
+    command: [python, -m, llm_service]
+    environment:
+      EL_VOICE_LLM_MODE: remote
+      EL_VOICE_LLM_HOST: 0.0.0.0
+      EL_VOICE_LLM_PORT: "8100"
+      EL_VOICE_WORKSPACE: /workspace
+      EL_VOICE_SETTINGS: /workspace/settings.json
+      EL_VOICE_SEARCH_PROVIDER: ${EL_VOICE_SEARCH_PROVIDER:-ddgs}
+      EL_VOICE_SEARCH_MAX_RESULTS: ${EL_VOICE_SEARCH_MAX_RESULTS:-5}
+      EL_VOICE_SEARCH_TIMEOUT: ${EL_VOICE_SEARCH_TIMEOUT:-8}
+      EL_VOICE_LLM_MAX_ITERATIONS: ${EL_VOICE_LLM_MAX_ITERATIONS:-3}
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
+      OPENCODE_GO_BASE_URL: ${OPENCODE_GO_BASE_URL:-https://opencode.ai/zen/go/v1}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4.1-flash}
+      OPENCODE_GO_SESSION_ID: ${OPENCODE_GO_SESSION_ID:-}
+      PYTHONPATH: /opt/llm-service:/workspace
+    volumes:
+      - ./workspace:/workspace:ro
+      - ./llm_service:/opt/llm-service/llm_service:ro
+    networks: [private, provider]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 128
+    stop_grace_period: 15s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz', timeout=3).read()
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+networks:
+  provider: {}

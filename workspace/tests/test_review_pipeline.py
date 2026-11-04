@@ -17,6 +17,8 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import nullcontext
+import uuid
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -34,7 +36,7 @@ class StubRuntime:
         self.config = config or {"speech": {"minimum_chunk_chars": 18, "first_chunk_max_chars": 60,
                                              "max_chunk_chars": 80}}
 
-    def transcribe(self, _audio):
+    def transcribe(self, _audio, cancel_event=None):
         return "Give me a short answer."
 
     def llm_stream(self, _text, _cancel, history):
@@ -42,12 +44,28 @@ class StubRuntime:
         yield from self.deltas
         self.generation_finished.set()
 
-    def synthesize(self, text):
+    def synthesize(self, text, cancel_event=None):
         self.synthesized.append(text)
         return b"\x00\x00" * 480, 24000
 
 
+def turn_id():
+    return uuid.uuid4().hex
+
+
 class SpeakableResponseTests(unittest.TestCase):
+    def test_stream_boundaries_preserve_spaces_and_hard_maximum(self):
+        chunks, tail = app._speakable_chunks("Hello ", max_chars=20, min_chars=8)
+        next_chunks, tail = app._speakable_chunks(tail + "world", max_chars=20, min_chars=8)
+        self.assertEqual(chunks + next_chunks, [])
+        self.assertEqual(app._sanitize_speech(tail).strip(), "Hello world")
+
+        long_chunks, remainder = app._speakable_chunks("word " * 25 + ".", max_chars=20, min_chars=12)
+        emitted = long_chunks + ([remainder.strip()] if remainder.strip() else [])
+        self.assertTrue(emitted)
+        self.assertTrue(all(len(chunk) <= 20 for chunk in emitted))
+        self.assertTrue("." in " ".join(emitted), "the sentence terminator must be retained")
+
     def test_streamed_tts_chunks_drop_markup_urls_and_emoji(self):
         original_runtime = app.runtime
         stub = StubRuntime()
@@ -66,7 +84,7 @@ class SpeakableResponseTests(unittest.TestCase):
             and not turn.cancel_event.is_set()
         )
         turn = SimpleNamespace(
-            turn_id="turn-review-test",
+            turn_id=turn_id(),
             cancel_event=threading.Event(),
         )
         session.current_turn = turn
@@ -112,7 +130,7 @@ class SpeakableResponseTests(unittest.TestCase):
             history=[], current_turn=None, turns={},
         )
         session.is_current = lambda turn: not session.stopped and session.current_turn is turn and not turn.cancel_event.is_set()
-        turn = SimpleNamespace(turn_id="chunking-turn", cancel_event=threading.Event())
+        turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
         session.current_turn = turn
         try:
             asyncio.run(app.process_turn(session, turn, b"audio"))
@@ -140,7 +158,7 @@ class StartupValidationTests(unittest.TestCase):
             "vad": {"sample_rate": 16000, "frame_samples": 512, "threshold": 0.55, "negative_threshold": 0.35,
                     "start_frames": 3, "end_silence_ms": 640, "min_speech_ms": 240, "pre_roll_ms": 320,
                     "max_utterance_seconds": 45},
-            "audio": {"max_buffered_audio_ms": 2000},
+            "audio": {"max_buffered_audio_ms": 2000, "packet_duration_ms": 800},
             "speech": {"minimum_chunk_chars": 18, "first_chunk_max_chars": 60, "max_chunk_chars": 80},
         }
         cases = [
@@ -195,6 +213,27 @@ class StartupValidationTests(unittest.TestCase):
         status = asyncio.run(fetch_status(invalid))
         self.assertTrue(status["ready"], "valid settings should allow normal initialization")
 
+    def test_non_object_settings_root_is_reported_as_not_ready(self):
+        async def status_for(root):
+            with patch.object(voice_pipeline, "_load_settings", return_value=root):
+                runtime = voice_pipeline.VoiceRuntime()
+            with patch.object(runtime, "_load_models", return_value=None):
+                await runtime.initialize()
+            previous = app.runtime
+            app.runtime = runtime
+            try:
+                response = await app.status()
+                return json.loads(response.body)
+            finally:
+                app.runtime = previous
+
+        for root in ([], None, "settings", 1):
+            with self.subTest(root=root):
+                status = asyncio.run(status_for(root))
+                self.assertFalse(status["ready"])
+                self.assertEqual(status["stage"], "error")
+                self.assertEqual(status["error"], "ValueError")
+
 
 class LogPrivacyTests(unittest.TestCase):
     def test_requested_text_and_errors_are_logged_without_audio_payload(self):
@@ -204,17 +243,17 @@ class LogPrivacyTests(unittest.TestCase):
         app.logger.addHandler(handler)
 
         class Runtime(StubRuntime):
-            def transcribe(self, _audio):
+            def transcribe(self, _audio, cancel_event=None):
                 return "transcript marker"
 
             def llm_stream(self, _text, _cancel, _history):
                 yield "reply marker."
 
-            def synthesize(self, _text):
+            def synthesize(self, _text, cancel_event=None):
                 return b"LOCAL_AUDIO_SECRET_SENTINEL!", 24000
 
         class BrokenRuntime(Runtime):
-            def transcribe(self, _audio):
+            def transcribe(self, _audio, cancel_event=None):
                 raise RuntimeError("synthetic inference failure")
 
         session = SimpleNamespace(
@@ -225,11 +264,11 @@ class LogPrivacyTests(unittest.TestCase):
 
         async def run():
             app.runtime = Runtime()
-            turn = SimpleNamespace(turn_id="log-success", cancel_event=threading.Event())
+            turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
             session.current_turn = turn
             await app.process_turn(session, turn, b"audio")
             app.runtime = BrokenRuntime()
-            failed_turn = SimpleNamespace(turn_id="log-error", cancel_event=threading.Event())
+            failed_turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
             session.current_turn = failed_turn
             await app.process_turn(session, failed_turn, b"audio")
 
@@ -314,7 +353,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         session = self.make_session()
         try:
             for index in range(2):
-                turn = SimpleNamespace(turn_id=f"turn-{index}", cancel_event=threading.Event())
+                turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
                 session.current_turn = turn
                 await app.process_turn(session, turn, b"audio")
                 while not session.outgoing.empty():
@@ -340,7 +379,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         runtime.llm_stream = streaming_llm
         app.runtime = runtime
         session = self.make_session("streaming-regression")
-        turn = SimpleNamespace(turn_id="streaming-turn", cancel_event=threading.Event())
+        turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
         session.current_turn = turn
         task = asyncio.create_task(app.process_turn(session, turn, b"audio"))
         try:
@@ -376,7 +415,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         app.runtime = FastRuntime()
         session = self.make_session("token-backpressure")
-        turn = SimpleNamespace(turn_id="token-turn", cancel_event=threading.Event())
+        turn = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
         session.current_turn = turn
         stream = app._llm_items(session, turn, "question")
         try:
@@ -394,7 +433,6 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_stt_worker_does_not_accumulate_and_replacement_runs(self):
         original_runtime = app.runtime
         started = threading.Event()
-        release_first = threading.Event()
         cancelled_first = threading.Event()
         counter_lock = threading.Lock()
 
@@ -414,10 +452,8 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     if call == 1:
                         started.set()
-                        if cancel_event is None:
-                            release_first.wait(timeout=1)
-                        else:
-                            cancel_event.wait(timeout=1)
+                        if cancel_event is not None:
+                            cancel_event.wait(timeout=2)
                             cancelled_first.set()
                     return f"question {call}"
                 finally:
@@ -427,8 +463,8 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         runtime = SlowRuntime()
         app.runtime = runtime
         session = self.make_session("cancelled-worker-regression")
-        obsolete = SimpleNamespace(turn_id="obsolete", cancel_event=threading.Event())
-        replacement = SimpleNamespace(turn_id="replacement", cancel_event=threading.Event())
+        obsolete = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
+        replacement = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
         session.current_turn = obsolete
         obsolete_task = asyncio.create_task(app.process_turn(session, obsolete, b"first"))
         try:
@@ -443,7 +479,6 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                                 for item in list(session.outgoing._queue)),
                             "the replacement turn must complete after residual inference exits")
         finally:
-            release_first.set()
             pending = [task for task in (obsolete_task, locals().get("replacement_task"))
                        if task and not task.done()]
             for task in pending:
@@ -467,8 +502,10 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                         self.calls = 0
                         self.active = 0
                         self.max_active = 0
+                        self.llm_lock = threading.Lock()
+                        self.tts_lock = threading.Lock()
 
-                    def begin_slow_call(self):
+                    def begin_slow_call(self, cancel_event):
                         with counter_lock:
                             self.calls += 1
                             call = self.calls
@@ -476,40 +513,42 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             self.max_active = max(self.max_active, self.active)
                         if call == 1:
                             started.set()
-                            time.sleep(0.15)
+                            cancel_event.wait(timeout=2)
                         return call
 
                     def llm_stream(self, _text, _cancel, _history):
-                        call = self.begin_slow_call() if stage == "llm" else 0
                         if stage == "llm":
-                            try:
-                                yield "This is the first complete sentence."
-                            finally:
-                                with counter_lock:
-                                    self.active -= 1
-                                if call == 1:
-                                    first_finished.set()
+                            with self.llm_lock:
+                                call = self.begin_slow_call(_cancel)
+                                try:
+                                    yield "This is the first complete sentence."
+                                finally:
+                                    with counter_lock:
+                                        self.active -= 1
+                                    if call == 1:
+                                        first_finished.set()
                         else:
                             yield "This is the first complete sentence."
 
-                    def synthesize(self, text):
+                    def synthesize(self, text, cancel_event=None):
                         self.synthesized.append(text)
                         if stage == "tts":
-                            call = self.begin_slow_call()
-                            try:
-                                return b"\x00\x00" * 480, 24000
-                            finally:
-                                with counter_lock:
-                                    self.active -= 1
-                                if call == 1:
-                                    first_finished.set()
+                            with self.tts_lock:
+                                call = self.begin_slow_call(cancel_event)
+                                try:
+                                    return b"\x00\x00" * 480, 24000
+                                finally:
+                                    with counter_lock:
+                                        self.active -= 1
+                                    if call == 1:
+                                        first_finished.set()
                         return b"\x00\x00" * 480, 24000
 
                 runtime = SlowRuntime()
                 app.runtime = runtime
                 session = self.make_session(f"cancelled-{stage}")
-                old = SimpleNamespace(turn_id=f"old-{stage}", cancel_event=threading.Event())
-                new = SimpleNamespace(turn_id=f"new-{stage}", cancel_event=threading.Event())
+                old = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
+                new = SimpleNamespace(turn_id=turn_id(), cancel_event=threading.Event())
                 session.current_turn = old
                 old_task = asyncio.create_task(app.process_turn(session, old, b"old"))
                 new_task = None
@@ -530,6 +569,165 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             task.cancel()
                     await asyncio.gather(old_task, *( [new_task] if new_task else []), return_exceptions=True)
                     app.runtime = original_runtime
+
+
+class RuntimeInferenceLockTests(unittest.TestCase):
+    def test_uncooperative_runtime_workers_serialize_across_repeated_replacements(self):
+        class EngineProbe:
+            def __init__(self):
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+                self.started = threading.Event()
+                self.replacement_started = threading.Event()
+                self.release = threading.Event()
+                self.guard = threading.Lock()
+
+            def enter(self):
+                with self.guard:
+                    self.calls += 1
+                    call = self.calls
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                if call % 2:
+                    self.started.set()
+                    self.release.wait(timeout=2)
+                else:
+                    self.replacement_started.set()
+                return call
+
+            def leave(self):
+                with self.guard:
+                    self.active -= 1
+
+        class Segment:
+            text = "replacement transcript"
+
+        class Whisper:
+            def __init__(self, probe):
+                self.probe = probe
+
+            def transcribe(self, *_args, **_kwargs):
+                def segments():
+                    self.probe.enter()
+                    try:
+                        yield Segment()
+                    finally:
+                        self.probe.leave()
+                return segments(), None
+
+        class LLM:
+            def __init__(self, probe):
+                self.probe = probe
+
+            def token_eos(self):
+                return 2
+
+            def create_chat_completion(self, **_kwargs):
+                def stream():
+                    call = self.probe.enter()
+                    try:
+                        yield {"choices": [{"delta": {"content": "replacement reply" if call % 2 == 0 else "obsolete"}}]}
+                    finally:
+                        self.probe.leave()
+                return stream()
+
+        class Tensor:
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def float(self):
+                return self
+
+            def flatten(self):
+                return self
+
+            def numel(self):
+                return 2
+
+            def clamp(self, *_args):
+                return self
+
+            def __mul__(self, _value):
+                return self
+
+            def to(self, _dtype):
+                return self
+
+            def numpy(self):
+                return np.array([0.25, -0.25], dtype=np.float32)
+
+        class TTS:
+            def __init__(self, probe):
+                self.probe = probe
+
+            def apply_tts(self, **_kwargs):
+                self.probe.enter()
+                try:
+                    return Tensor()
+                finally:
+                    self.probe.leave()
+
+        class Torch:
+            int16 = object()
+
+            @staticmethod
+            def inference_mode():
+                return nullcontext()
+
+            @staticmethod
+            def isfinite(_audio):
+                return SimpleNamespace(all=lambda: True)
+
+        runtime = voice_pipeline.VoiceRuntime()
+        runtime.config = voice_pipeline._load_settings()
+        probes = {stage: EngineProbe() for stage in ("stt", "llm", "tts")}
+        runtime.whisper = Whisper(probes["stt"])
+        runtime.llm = LLM(probes["llm"])
+        runtime.tts = TTS(probes["tts"])
+        runtime.torch = Torch()
+
+        def invoke(stage, cancelled, result):
+            if stage == "stt":
+                result.append(runtime.transcribe(np.zeros(16000, dtype=np.float32), cancelled))
+            elif stage == "llm":
+                result.append("".join(runtime.llm_stream("prompt", cancelled, [])))
+            else:
+                result.append(runtime.synthesize("spoken text", cancelled)[0])
+
+        for stage, probe in probes.items():
+            for _attempt in range(3):
+                probe.started.clear()
+                probe.replacement_started.clear()
+                probe.release.clear()
+                obsolete_cancel = threading.Event()
+                replacement_cancel = threading.Event()
+                obsolete_result, replacement_result = [], []
+                obsolete = threading.Thread(target=invoke, args=(stage, obsolete_cancel, obsolete_result))
+                replacement = threading.Thread(target=invoke, args=(stage, replacement_cancel, replacement_result))
+                obsolete.start()
+                self.assertTrue(probe.started.wait(1), f"{stage} obsolete engine call should start")
+                cancelled_at = time.monotonic()
+                obsolete_cancel.set()
+                replacement.start()
+                self.assertFalse(probe.replacement_started.wait(0.05),
+                                 f"{stage} replacement must wait while uncancellable inference owns the runtime lock")
+                self.assertEqual(probe.active, 1)
+                probe.release.set()
+                obsolete.join(2)
+                replacement.join(2)
+                self.assertFalse(obsolete.is_alive())
+                self.assertFalse(replacement.is_alive())
+                self.assertTrue(probe.replacement_started.is_set())
+                self.assertEqual(probe.max_active, 1, f"{stage} obsolete workers must not overlap replacements")
+                self.assertLess(time.monotonic() - cancelled_at, 1,
+                                f"{stage} replacement should finish promptly once residual work exits")
+                if stage in ("stt", "llm"):
+                    self.assertEqual(obsolete_result, [""], f"cancelled {stage} result must be discarded")
+                self.assertTrue(replacement_result, f"replacement {stage} inference must complete")
 
 
 class StreamingVADStateTests(unittest.TestCase):
@@ -602,14 +800,14 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             def new_vad(self):
                 return VAD()
 
-            def transcribe(self, _audio):
+            def transcribe(self, _audio, cancel_event=None):
                 return "test question"
 
             def llm_stream(self, _text, _cancel, _history):
                 for index in range(100):
                     yield f"Spoken sentence number {index} ends here. "
 
-            def synthesize(self, _text):
+            def synthesize(self, _text, cancel_event=None):
                 return b"\x00\x00" * 2400, 24000
 
         runtime = Runtime()
@@ -723,6 +921,121 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             app.boot_task = original_boot_task
 
 
+class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_two_websocket_turns_pass_exact_prior_exchange_to_llm(self):
+        import uvicorn
+        import websockets
+
+        class VAD:
+            def __init__(self):
+                self.index = 0
+
+            def accept(self, _samples):
+                sequence = self.index
+                self.index += 1
+                if sequence in (0, 2):
+                    return "start", None, 0.99
+                if sequence in (1, 3):
+                    return "end", np.zeros(16000, dtype=np.float32), 0.01
+                return None, None, 0.01
+
+        class Runtime:
+            def __init__(self):
+                self.status = {"ready": True, "stage": "ready"}
+                self.config = {"audio": {"max_buffered_audio_ms": 2000}, "speech": {}}
+                self.metrics = []
+                self.histories = []
+                self.count = 0
+
+            async def initialize(self):
+                pass
+
+            def status_snapshot(self):
+                return {"ready": True, "stage": "ready"}
+
+            def new_vad(self):
+                return VAD()
+
+            def transcribe(self, _audio, cancel_event=None):
+                self.count += 1
+                return f"question {self.count}"
+
+            def llm_stream(self, _text, _cancel, history):
+                self.histories.append(list(history))
+                yield "The first answer." if not history else "The contextual follow-up."
+
+            def synthesize(self, _text, cancel_event=None):
+                return b"\x01\x00" * 480, 24000
+
+        runtime = Runtime()
+        original_runtime, original_boot, original_active = app.runtime, app.boot_task, app.active_session
+        app.runtime, app.boot_task, app.active_session = runtime, None, None
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.setblocking(False)
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app.app, log_level="critical", lifespan="on"))
+        server_task = asyncio.create_task(server.serve(sockets=[listener]))
+        client = None
+        try:
+            async with asyncio.timeout(3):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+            client = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
+            await client.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            while json.loads(await client.recv()).get("type") != "session_started":
+                pass
+
+            for expected_turn in range(1, 3):
+                await client.send(b"\x00\x00" * 512)
+                await client.send(b"\x00\x00" * 512)
+                async with asyncio.timeout(3):
+                    while True:
+                        message = await client.recv()
+                        if isinstance(message, bytes):
+                            self.assertEqual(message[:4], b"ELVA")
+                            sequence = int.from_bytes(message[20:24], "big")
+                            turn_hex = message[4:20].hex()
+                            await client.send(json.dumps({
+                                "type": "playback_queue", "turn_id": turn_hex,
+                                "sequence": sequence, "consumed_ms": 0, "buffered_ms": 20,
+                            }))
+                            continue
+                        event = json.loads(message)
+                        if event.get("type") == "turn_complete":
+                            self.assertEqual(int(event["turn_id"] is not None), 1)
+                            await client.send(json.dumps({
+                                "type": "playback_finished", "turn_id": event["turn_id"],
+                            }))
+                            break
+                self.assertEqual(runtime.count, expected_turn)
+
+            self.assertEqual(runtime.histories[0], [])
+            self.assertEqual(runtime.histories[1], [
+                {"role": "user", "content": "question 1"},
+                {"role": "assistant", "content": "The first answer."},
+            ])
+        finally:
+            if client is not None:
+                try:
+                    await asyncio.wait_for(client.close(), timeout=0.5)
+                except Exception:
+                    pass
+            if app.active_session is not None:
+                app.active_session.stopped = True
+                for turn in app.active_session.turns.values():
+                    turn.cancel_event.set()
+            server.should_exit = True
+            try:
+                await asyncio.wait_for(server_task, timeout=3)
+            except Exception:
+                server_task.cancel()
+                await asyncio.gather(server_task, return_exceptions=True)
+            app.runtime, app.boot_task, app.active_session = original_runtime, original_boot, original_active
+
+
 class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
     async def test_server_waits_for_browser_audio_capacity_acknowledgement(self):
         import uvicorn
@@ -744,7 +1057,7 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.status = {"ready": True, "stage": "ready"}
                 self.metrics = []
-                self.config = {"audio": {"max_buffered_audio_ms": 2000}}
+                self.config = {"audio": {"max_buffered_audio_ms": 500, "packet_duration_ms": 200}}
 
             async def initialize(self):
                 pass
@@ -755,15 +1068,14 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
             def new_vad(self):
                 return VAD()
 
-            def transcribe(self, _audio):
+            def transcribe(self, _audio, cancel_event=None):
                 return "question"
 
             def llm_stream(self, _text, _cancel, _history):
-                for index in range(5):
-                    yield f"This is response sentence number {index}. "
+                yield "The long response is split into packets."
 
-            def synthesize(self, _text):
-                return b"\x00\x00" * 24000, 24000
+            def synthesize(self, _text, cancel_event=None):
+                return b"\x00\x00" * (24000 * 3), 24000
 
         runtime = Runtime()
         original_runtime, original_boot, original_active = app.runtime, app.boot_task, app.active_session
@@ -795,6 +1107,46 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
 
             return await asyncio.wait_for(receive(), timeout=timeout)
 
+        playback_tail = 0.0
+        last_ack_buffered = 0.0
+        scheduled_ends = []
+        audio_packets = []
+
+        async def acknowledge_schedule(packet):
+            nonlocal playback_tail, last_ack_buffered
+            turn_id = packet[4:20].hex()
+            sequence = int.from_bytes(packet[20:24], "big")
+            rate = int.from_bytes(packet[24:28], "big")
+            duration_ms = (len(packet) - 28) * 500 / rate
+            now = time.monotonic()
+            start_at = max(now + 0.015, playback_tail)
+            playback_tail = start_at + duration_ms / 1000
+            scheduled_ends.append(playback_tail)
+            buffered_ms = max(0.0, (playback_tail - time.monotonic()) * 1000)
+            consumed_ms = max(0.0, last_ack_buffered + duration_ms - buffered_ms)
+            last_ack_buffered = buffered_ms
+            await client.send(json.dumps({
+                "type": "playback_queue", "turn_id": turn_id, "sequence": sequence,
+                "consumed_ms": consumed_ms, "buffered_ms": buffered_ms,
+            }))
+            audio_packets.append(packet)
+
+        async def acknowledge_completed_source():
+            nonlocal last_ack_buffered
+            if not scheduled_ends:
+                return
+            end_at = scheduled_ends.pop(0)
+            await asyncio.sleep(max(0.0, end_at - time.monotonic()))
+            buffered_ms = max(0.0, (playback_tail - time.monotonic()) * 1000)
+            consumed_ms = max(0.0, last_ack_buffered - buffered_ms)
+            last_ack_buffered = buffered_ms
+            turn_id = app.active_session.current_turn.turn_id
+            sequence = int.from_bytes(audio_packets[-1][20:24], "big")
+            await client.send(json.dumps({
+                "type": "playback_queue", "turn_id": turn_id, "sequence": sequence,
+                "consumed_ms": consumed_ms, "buffered_ms": buffered_ms,
+            }))
+
         try:
             async with asyncio.timeout(3):
                 while not server.started:
@@ -805,18 +1157,36 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
                 pass
             await client.send(b"\x00\x00" * 512)
             await client.send(b"\x00\x00" * 512)
-            first = await next_audio(2)
-            second = await next_audio(2)
-            self.assertTrue(first and second, "two independently framed audio chunks should be delivered")
+            for _ in range(2):
+                packet = await next_audio(2)
+                await acknowledge_schedule(packet)
             with self.assertRaises(asyncio.TimeoutError):
-                await next_audio(0.15)
+                await next_audio(0.05)
             turn_id = app.active_session.current_turn.turn_id
-            for _ in range(3):
-                await client.send(json.dumps({
-                    "type": "playback_queue", "turn_id": turn_id,
-                    "consumed_ms": 1000, "buffered_ms": 1000,
-                }))
-                await next_audio(1)
+            await client.send(json.dumps({
+                "type": "playback_queue", "turn_id": turn_id,
+                "sequence": 999, "consumed_ms": 0, "buffered_ms": 0,
+            }))
+            with self.assertRaises(asyncio.TimeoutError):
+                await next_audio(0.05)
+            while True:
+                try:
+                    packet = await next_audio(0.04)
+                    await acknowledge_schedule(packet)
+                except asyncio.TimeoutError:
+                    await acknowledge_completed_source()
+                    packet = await next_audio(1)
+                    await acknowledge_schedule(packet)
+                if len(audio_packets) >= 15:
+                    break
+            self.assertEqual(len(audio_packets), 15, "three seconds of TTS must be split into 200 ms packets")
+            self.assertEqual(sum(len(packet) - 28 for packet in audio_packets), 24000 * 2 * 3)
+            while True:
+                message = await asyncio.wait_for(client.recv(), timeout=1)
+                if isinstance(message, str) and json.loads(message).get("type") == "turn_complete":
+                    break
+            while scheduled_ends:
+                await acknowledge_completed_source()
         finally:
             if client is not None:
                 try:
@@ -839,6 +1209,41 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
                 except asyncio.CancelledError:
                     pass
             app.runtime, app.boot_task, app.active_session = original_runtime, original_boot, original_active
+
+
+class PlaybackAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_acknowledgement_keeps_reserved_unsent_packet_duration(self):
+        original_runtime = app.runtime
+        app.runtime = SimpleNamespace(config={"audio": {"max_buffered_audio_ms": 2000}})
+        session = app.VoiceSession("credit-test", websocket=None, vad=None)
+        turn = voice_pipeline.Turn(turn_id())
+        session.current_turn = turn
+        session.remember_turn(turn)
+        session.audio_sent_sequence[turn.turn_id] = 0
+        session.audio_packet_durations[turn.turn_id] = {0: 800.0, 1: 800.0}
+        session.browser_buffered_ms = 1600.0
+        queued_packet = (
+            b"ELVA" + bytes.fromhex(turn.turn_id) + (1).to_bytes(4, "big")
+            + (24000).to_bytes(4, "big") + b"\x00\x00" * (24000 * 800 // 1000)
+        )
+        session.outgoing.put_nowait(app.Outbound(
+            event={"type": "audio_chunk", "turn_id": turn.turn_id, "sequence": 1},
+            audio=queued_packet,
+            turn_id=turn.turn_id,
+        ))
+
+        try:
+            await app.receive_control(session, json.dumps({
+                "type": "playback_queue", "turn_id": turn.turn_id,
+                "sequence": 0, "consumed_ms": 785.0, "buffered_ms": 815.0,
+            }))
+            self.assertEqual(session.audio_packet_durations[turn.turn_id], {1: 800.0})
+            self.assertEqual(session.browser_buffered_ms, 1615.0,
+                             "the earlier client snapshot must preserve its reserved unsent packet")
+            self.assertEqual(session.outgoing.qsize(), 1,
+                             "the packet whose duration remains reserved must still be queued for the stalled sender")
+        finally:
+            app.runtime = original_runtime
 
 
 if __name__ == "__main__":

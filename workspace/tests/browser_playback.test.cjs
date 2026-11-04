@@ -11,6 +11,7 @@ class Element {
     this.value = "1";
   }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
+  setAttribute(name, value) { this.attributes ||= new Map(); this.attributes.set(name, value); }
   append(...items) { this.children.push(...items); }
   replaceChildren(...items) { this.children = items; }
   querySelector() { return new Element(); }
@@ -137,9 +138,20 @@ async function run() {
     const bufferedMs = (api.getQueueEnd(turn) - audio.currentTime) * 1000;
     assert.equal(scheduled, 8, "all audio must play eventually as browser capacity is released");
     assert.ok(bufferedMs <= 2000, `configured browser buffer limit exceeded: ${bufferedMs} ms`);
-    assert.ok(socket.sent.some(message => {
-      try { return JSON.parse(message).type === "playback_queue"; } catch (_) { return false; }
-    }), "the browser must report queue duration so the server can apply backpressure");
+    const acknowledgements = socket.sent.map(message => {
+      try { return JSON.parse(message); } catch (_) { return null; }
+    }).filter(message => message?.type === "playback_queue");
+    assert.ok(acknowledgements.length > 0, "the browser must report queue duration so the server can apply backpressure");
+    assert.ok(acknowledgements.every(message => message.turn_id === turn
+      && Number.isInteger(message.sequence) && message.buffered_ms >= 0 && message.consumed_ms >= 0),
+    "each audio acknowledgement must identify its turn, packet sequence, and buffered/consumed duration");
+    assert.ok(acknowledgements.some(message => message.consumed_ms > 0),
+      "source completion must return playback credit to the server");
+    assert.ok(acknowledgements.every((message, index) => index === 0
+      || message.sequence >= acknowledgements[index - 1].sequence),
+    "completion acknowledgements must never move behind the latest scheduled packet");
+    assert.ok(acknowledgements.some(message => message.sequence === 1 && message.consumed_ms > 0),
+      "completion of packet zero after packet one is scheduled must acknowledge the latest received sequence");
   });
 
   await check("malformed, invalid-rate, and out-of-order packets are rejected", async () => {
@@ -178,8 +190,7 @@ async function run() {
     await api.connectSocket();
     const ws = FakeWebSocket.instances.at(-1);
     api.setAudio(audio, ws);
-    await api.handleServerMessage(JSON.stringify({ type: "audio_chunk", turn_id: "close-turn", sample_rate: 24000 }));
-    await api.handleServerMessage(new ArrayBuffer(4800));
+    await api.handleServerMessage(makePacket("00112233445566778899aabbccddeeff", 0, 24000));
     assert.ok(audio.sources.some(source => source.when !== undefined), "audio should be scheduled first");
     ws.onclose();
     assert.ok(audio.sources.every(source => source.stopped), "socket close must stop active and scheduled sources");
@@ -202,17 +213,24 @@ async function run() {
 
   await check("messages from an old socket cannot append after reconnect", async () => {
     const { api } = harness();
+    const audio = new FakeAudioContext();
     await api.connectSocket();
     const oldSocket = FakeWebSocket.instances.at(-1);
-    const turn = "old-session-turn";
+    api.setAudio(audio, oldSocket);
+    const turn = "00112233445566778899aabbccddeeff";
     oldSocket.onmessage({ data: JSON.stringify({ type: "text_delta", turn_id: turn, text: "old start" }) });
     oldSocket.onclose();
     await api.connectSocket();
+    api.setAudio(audio, FakeWebSocket.instances.at(-1));
     oldSocket.onmessage({ data: JSON.stringify({ type: "text_delta", turn_id: turn, text: " stale" }) });
+    oldSocket.onmessage({ data: makePacket(turn, 0, 24000) });
     assert.equal(api.getAssistantText(turn), "old start", "stale old-session text must be ignored");
+    assert.equal(audio.sources.filter(source => source.when !== undefined).length, 0,
+      "stale old-session audio must not be scheduled after reconnect");
   });
 
   await check("visible mute and volume controls change the playback gain", async () => {
+    assert.match(html, /id="stop-button"[^>]*hidden/, "end session must be hidden until a session starts");
     const muteMarkup = html.match(/<button[^>]*id="mute-button"[^>]*>/)?.[0];
     const volumeMarkup = html.match(/<input[^>]*id="volume-control"[^>]*>/)?.[0];
     assert.ok(muteMarkup && !/\shidden(?:\s|>)/.test(muteMarkup), "mute must be visible in the page markup");
@@ -230,8 +248,9 @@ async function run() {
     assert.equal(source.target, audio.gains.at(-1), "scheduled output must route through the user-controlled gain");
     await mute.listeners.get("click")();
     assert.equal(audio.gains.at(-1).gain.value, 0);
+    await mute.listeners.get("click")();
     volume.value = "0.4";
-    await volume.listeners.get("input")();
+    await volume.listeners.get("input")({ currentTarget: volume });
     assert.equal(audio.gains.at(-1).gain.value, 0.4);
   });
 
@@ -244,7 +263,7 @@ async function run() {
       metrics: {}, audio: { max_buffered_audio_ms: 2000, current_buffered_audio_ms: 500 },
     });
     const diagnostics = elements.get("#diagnostics-content").children.map(row => row.textContent).join(" ");
-    assert.match(diagnostics, /Audio buffering/i, "the user should see the active audio queue limit");
+    assert.match(diagnostics, /Browser audio queue limit/i, "the user should see the active audio queue limit");
     api.reportClientError("synthetic browser playback error");
     const report = JSON.parse(socket.sent.at(-1));
     assert.equal(report.type, "client_error");

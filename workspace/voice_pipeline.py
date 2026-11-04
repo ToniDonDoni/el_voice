@@ -32,6 +32,63 @@ def _load_settings() -> dict[str, Any]:
     return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
 
 
+def _validate_settings(settings: dict[str, Any]) -> None:
+    """Reject malformed model and streaming settings before readiness is reported."""
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+
+    def integer(section: str, key: str, low: int, high: int) -> int:
+        group = settings.get(section)
+        value = group.get(key) if isinstance(group, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ValueError(f"{section}.{key} must be an integer from {low} to {high}")
+        return value
+
+    tts_rate = integer("tts", "sample_rate", 8000, 48000)
+    if tts_rate != 24000:
+        raise ValueError("tts.sample_rate must be 24000 for the browser audio protocol")
+    integer("tts", "cpu_threads", 1, 64)
+    integer("stt", "cpu_threads", 1, 64)
+    integer("llm", "cpu_threads", 1, 64)
+    integer("llm", "context_tokens", 512, 32768)
+    integer("llm", "batch_tokens", 1, 4096)
+    integer("llm", "max_response_tokens", 1, 4096)
+    vad = settings.get("vad")
+    if not isinstance(vad, dict):
+        raise ValueError("vad must be an object")
+    if integer("vad", "sample_rate", 16000, 16000) != SAMPLE_RATE:
+        raise ValueError("vad.sample_rate must be 16000")
+    if integer("vad", "frame_samples", 512, 512) != VAD_FRAME_SAMPLES:
+        raise ValueError("vad.frame_samples must be 512")
+    for key in ("threshold", "negative_threshold"):
+        value = vad.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < 1:
+            raise ValueError(f"vad.{key} must be between 0 and 1")
+    if vad["negative_threshold"] >= vad["threshold"]:
+        raise ValueError("vad.negative_threshold must be below vad.threshold")
+    for key, low, high in (("start_frames", 1, 20), ("end_silence_ms", 100, 5000),
+                           ("min_speech_ms", 100, 5000), ("pre_roll_ms", 0, 2000),
+                           ("max_utterance_seconds", 1, 180)):
+        integer("vad", key, low, high)
+    for section, defaults in (("audio", {"max_buffered_audio_ms": 2000,
+                                         "packet_duration_ms": 800}),
+                              ("speech", {"minimum_chunk_chars": 18,
+                                          "first_chunk_max_chars": 60,
+                                          "max_chunk_chars": 80})):
+        settings.setdefault(section, defaults)
+        if not isinstance(settings[section], dict):
+            raise ValueError(f"{section} must be an object")
+    max_buffered_audio_ms = integer("audio", "max_buffered_audio_ms", 500, 10000)
+    packet_duration_ms = integer("audio", "packet_duration_ms", 100, 2000)
+    if packet_duration_ms + 25 > max_buffered_audio_ms:
+        raise ValueError("audio.packet_duration_ms must leave room for browser scheduling lead-in")
+    integer("speech", "minimum_chunk_chars", 1, 200)
+    first = integer("speech", "first_chunk_max_chars", 1, 300)
+    maximum = integer("speech", "max_chunk_chars", 1, 300)
+    if first > maximum:
+        raise ValueError("speech.first_chunk_max_chars must not exceed speech.max_chunk_chars")
+
+
 def _load_manifest() -> dict[str, Any]:
     return json.loads(Path("/opt/el-voice/models.json").read_text(encoding="utf-8"))
 
@@ -175,12 +232,19 @@ class Turn:
 
 class VoiceRuntime:
     def __init__(self):
-        self.config = _load_settings()
+        self.config_error: Exception | None = None
+        try:
+            self.config = _load_settings()
+            if not isinstance(self.config, dict):
+                raise ValueError("settings root must be an object")
+        except Exception as exc:
+            self.config = {}
+            self.config_error = exc
         self.status: dict[str, Any] = {
-            "stage": "loading",
+            "stage": "error" if self.config_error else "loading",
             "ready": False,
             "models": {"vad": "loading", "stt": "loading", "llm": "loading", "tts": "loading"},
-            "error": None,
+            "error": type(self.config_error).__name__ if self.config_error else None,
         }
         self.whisper = None
         self.llm = None
@@ -188,11 +252,15 @@ class VoiceRuntime:
         self.torch = None
         self.llm_lock = threading.Lock()
         self.tts_lock = threading.Lock()
+        self.stt_lock = threading.Lock()
         self.metrics: deque[dict[str, float]] = deque(maxlen=100)
         self.vad_config = self.config.get("vad", {})
 
     async def initialize(self) -> None:
         try:
+            if self.config_error:
+                raise ValueError(f"Could not load settings: {self.config_error}") from self.config_error
+            _validate_settings(self.config)
             await asyncio.to_thread(self._load_models)
             self.status.update(stage="ready", ready=True, error=None)
         except Exception as exc:
@@ -252,11 +320,13 @@ class VoiceRuntime:
     def new_vad(self) -> StreamingSileroVAD:
         return StreamingSileroVAD(self.vad_config)
 
-    def transcribe(self, audio: np.ndarray) -> str:
+    def transcribe(self, audio: np.ndarray, cancel_event: threading.Event | None = None) -> str:
         if self.whisper is None:
             raise RuntimeError("STT is not ready")
 
         def run() -> str:
+            if cancel_event and cancel_event.is_set():
+                return ""
             segments, _info = self.whisper.transcribe(
                 audio,
                 language=self.config["stt"]["language"],
@@ -268,9 +338,20 @@ class VoiceRuntime:
                 vad_filter=False,
                 without_timestamps=True,
             )
-            return " ".join(segment.text.strip() for segment in segments).strip()
+            text = []
+            for segment in segments:
+                if cancel_event and cancel_event.is_set():
+                    break
+                text.append(segment.text.strip())
+            return " ".join(text).strip()
 
-        return run()
+        while not (cancel_event and cancel_event.is_set()):
+            if self.stt_lock.acquire(timeout=0.05):
+                try:
+                    return run()
+                finally:
+                    self.stt_lock.release()
+        return ""
 
     def llm_stream(
         self,
@@ -290,7 +371,12 @@ class VoiceRuntime:
         messages.extend(history[-8:])
         messages.append({"role": "user", "content": user_text})
         processor = CancelOnToken(cancel_event, self.llm.token_eos())
-        with self.llm_lock:
+        while not cancel_event.is_set():
+            if self.llm_lock.acquire(timeout=0.05):
+                break
+        else:
+            return
+        try:
             stream = self.llm.create_chat_completion(
                 messages=messages,
                 stream=True,
@@ -310,16 +396,30 @@ class VoiceRuntime:
                 close = getattr(stream, "close", None)
                 if close:
                     close()
+        finally:
+            self.llm_lock.release()
 
-    def synthesize(self, text: str) -> tuple[bytes, int]:
+    def synthesize(
+        self, text: str, cancel_event: threading.Event | None = None
+    ) -> tuple[bytes, int]:
         if self.tts is None:
             raise RuntimeError("TTS is not ready")
-        with self.tts_lock, self.torch.inference_mode():
-            audio = self.tts.apply_tts(
-                text=text,
-                speaker=self.config["tts"]["speaker"],
-                sample_rate=int(self.config["tts"]["sample_rate"]),
-            )
+        while not (cancel_event and cancel_event.is_set()):
+            if self.tts_lock.acquire(timeout=0.05):
+                break
+        else:
+            return b"", int(self.config["tts"]["sample_rate"])
+        try:
+            if cancel_event and cancel_event.is_set():
+                return b"", int(self.config["tts"]["sample_rate"])
+            with self.torch.inference_mode():
+                audio = self.tts.apply_tts(
+                    text=text,
+                    speaker=self.config["tts"]["speaker"],
+                    sample_rate=int(self.config["tts"]["sample_rate"]),
+                )
+        finally:
+            self.tts_lock.release()
         audio = audio.detach().cpu().float().flatten()
         if audio.numel() == 0 or not bool(self.torch.isfinite(audio).all()):
             raise RuntimeError("TTS returned invalid audio")
@@ -345,6 +445,7 @@ class VoiceRuntime:
             "architecture": "aarch64",
             "model_file_count": len(_load_manifest()["assets"]) if self.status["ready"] else None,
             "vad": {"type": "Silero ONNX bundled with faster-whisper", **self.vad_config},
+            "audio": self.config.get("audio", {"max_buffered_audio_ms": 2000}),
             "metrics": {
                 "response_samples": len(response),
                 "interrupt_samples": len(interrupt),

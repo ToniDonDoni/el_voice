@@ -7,6 +7,8 @@ import asyncio
 import json
 import logging
 import math
+import re
+import struct
 import time
 import uuid
 from collections import deque
@@ -61,6 +63,17 @@ class VoiceSession:
     tasks: set[asyncio.Task] = field(default_factory=set)
     interrupt_pending: dict[str, float] = field(default_factory=dict)
     stopped: bool = False
+    audio_sequence: dict[str, int] = field(default_factory=dict)
+    audio_ack_sequence: dict[str, int] = field(default_factory=dict)
+    audio_ack_buffered_ms: dict[str, float] = field(default_factory=dict)
+    audio_ack_consumed_ms: dict[str, float] = field(default_factory=dict)
+    audio_sent_sequence: dict[str, int] = field(default_factory=dict)
+    audio_packet_durations: dict[str, dict[int, float]] = field(default_factory=dict)
+    browser_buffered_ms: float = 0.0
+    audio_capacity: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __post_init__(self) -> None:
+        self.audio_capacity.set()
 
     def is_current(self, turn: Turn) -> bool:
         return not self.stopped and self.current_turn is turn and not turn.cancel_event.is_set()
@@ -163,6 +176,10 @@ async def websocket_sender(session: VoiceSession) -> None:
                     if turn is None or not session.is_current(turn):
                         continue
                 await websocket.send_bytes(message.audio)
+                if len(message.audio) >= 28 and message.audio[:4] == b"ELVA":
+                    sent_turn_id = message.audio[4:20].hex()
+                    sent_sequence = struct.unpack_from(">I", message.audio, 20)[0]
+                    session.audio_sent_sequence[sent_turn_id] = sent_sequence
         except (WebSocketDisconnect, RuntimeError):
             session.stopped = True
             return
@@ -177,28 +194,46 @@ def _next(iterator):
         return False, None
 
 
-def _speakable_chunks(buffer: str, max_chars: int = 80) -> tuple[list[str], str]:
+def _sanitize_speech(text: str) -> str:
+    """Remove formatting and non-spoken tokens while preserving readable text."""
+    import unicodedata
+
+    text = re.sub(r"\[([^\]]+)\]\((?:https?://)?[^)]+\)", r"\1", text)
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"```.*?```|`([^`]*)`", lambda match: match.group(1) or " ", text, flags=re.DOTALL)
+    text = re.sub(r"[*_~>#|]", " ", text)
+    text = "".join(character if unicodedata.category(character) not in ("So", "Sk") else " "
+                    for character in text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _speakable_chunks(buffer: str, max_chars: int = 80, min_chars: int = 18) -> tuple[list[str], str]:
     chunks: list[str] = []
-    remaining = buffer
+    raw = buffer
+    incomplete_url = re.search(r"(?:https?://|www\.)\S*$", raw, flags=re.IGNORECASE)
+    protected_tail = raw[incomplete_url.start():] if incomplete_url else ""
+    remaining = _sanitize_speech(raw[:incomplete_url.start()] if incomplete_url else raw)
     while remaining:
         boundary = None
         for index, character in enumerate(remaining):
-            if character in ".!?…。！？" and index >= 18:
+            if character in ".!?…。！？" and min_chars <= index < max_chars:
                 boundary = index + 1
                 while boundary < len(remaining) and remaining[boundary].isspace():
                     boundary += 1
                 break
         if boundary is None and len(remaining) > max_chars:
             boundary = remaining.rfind(" ", 0, max_chars + 1)
-            if boundary < 35:
+            if boundary <= 0:
                 boundary = max_chars
         if boundary is None:
             break
         piece = remaining[:boundary].strip()
+        piece = _sanitize_speech(piece)
         if piece:
             chunks.append(piece)
         remaining = remaining[boundary:].lstrip()
-    return chunks, remaining
+    return chunks, (remaining + " " + protected_tail).strip() if protected_tail else remaining
 
 
 async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
@@ -248,7 +283,8 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
     transcript: str | None = None
     reply_logged = False
     try:
-        text = await asyncio.to_thread(runtime.transcribe, audio)
+        stage = "stt"
+        text = await asyncio.to_thread(runtime.transcribe, audio, turn.cancel_event)
         transcript = text
         if not session.is_current(turn):
             log_event("turn_discarded_after_transcription", session_id=session.session_id, turn_id=turn.turn_id)
@@ -265,6 +301,13 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         )
         await queue_event(session, {"type": "generation_started", "turn_id": turn.turn_id}, turn.turn_id)
         text_buffer = ""
+        stage = "llm"
+        first_speech_chunk = True
+        runtime_config = getattr(runtime, "config", {})
+        speech_config = runtime_config.get("speech", {})
+        max_chars = int(speech_config.get("max_chunk_chars", 80))
+        minimum_chars = int(speech_config.get("minimum_chunk_chars", 18))
+        first_max_chars = int(speech_config.get("first_chunk_max_chars", 60))
         async for delta in _llm_items(session, turn, text):
             if not session.is_current(turn):
                 return
@@ -273,16 +316,24 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             await queue_event(
                 session, {"type": "text_delta", "turn_id": turn.turn_id, "text": delta}, turn.turn_id
             )
-            chunks, text_buffer = _speakable_chunks(text_buffer)
+            chunks, text_buffer = _speakable_chunks(
+                text_buffer,
+                max_chars=first_max_chars if first_speech_chunk else max_chars,
+                min_chars=minimum_chars,
+            )
             for chunk in chunks:
                 if not session.is_current(turn):
                     return
+                stage = "tts"
                 await synthesize_and_queue(session, turn, chunk)
+                first_speech_chunk = False
 
         if not session.is_current(turn):
             return
-        if text_buffer.strip():
-            await synthesize_and_queue(session, turn, text_buffer.strip())
+        final_chunk = _sanitize_speech(text_buffer)
+        if final_chunk:
+            stage = "tts"
+            await synthesize_and_queue(session, turn, final_chunk)
         answer = "".join(answer_parts).strip()
         if answer and session.is_current(turn):
             session.history.extend(
@@ -300,7 +351,7 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         raise
     except Exception as exc:
         log_event("turn_error", session_id=session.session_id, turn_id=turn.turn_id,
-                  stage="pipeline", error=type(exc).__name__, detail=str(exc)[:500])
+                  stage=stage, error=type(exc).__name__, detail=str(exc)[:500] or repr(exc)[:500])
         if session.is_current(turn):
             await queue_event(
                 session,
@@ -316,24 +367,65 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
 async def synthesize_and_queue(session: VoiceSession, turn: Turn, text: str) -> None:
     if not session.is_current(turn):
         return
-    audio, sample_rate = await asyncio.to_thread(runtime.synthesize, text)
+    audio, sample_rate = await asyncio.to_thread(runtime.synthesize, text, turn.cancel_event)
     if not session.is_current(turn):
         return
+    runtime_config = getattr(runtime, "config", {})
+    audio_config = runtime_config.get("audio", {})
+    max_buffered_ms = float(audio_config.get("max_buffered_audio_ms", 2000))
+    packet_duration_ms = float(audio_config.get("packet_duration_ms", 800))
+    if not hasattr(session, "browser_buffered_ms"):
+        session.browser_buffered_ms = 0.0
+    if not hasattr(session, "audio_capacity"):
+        session.audio_capacity = asyncio.Event()
+        session.audio_capacity.set()
+    if not hasattr(session, "audio_sequence"):
+        session.audio_sequence = {}
+    if not hasattr(session, "audio_ack_sequence"):
+        session.audio_ack_sequence = {}
+    if not hasattr(session, "audio_sent_sequence"):
+        session.audio_sent_sequence = {}
+    if not hasattr(session, "audio_packet_durations"):
+        session.audio_packet_durations = {}
+    packet_bytes = max(2, int(sample_rate * packet_duration_ms / 1000) * 2)
+    packet_bytes -= packet_bytes % 2
     log_event("tts_chunk_ready", session_id=session.session_id, turn_id=turn.turn_id,
               characters=len(text), audio_bytes=len(audio), sample_rate=sample_rate)
-    await session.outgoing.put(
-        Outbound(
-            event={
-                "type": "audio_chunk",
-                "turn_id": turn.turn_id,
-                "sample_rate": sample_rate,
-                "encoding": "pcm_s16le_mono",
-                "text": text,
-            },
-            audio=audio,
-            turn_id=turn.turn_id,
+    for offset in range(0, len(audio), packet_bytes):
+        if not session.is_current(turn):
+            return
+        payload = audio[offset:offset + packet_bytes]
+        duration_ms = len(payload) * 500 / sample_rate
+        while session.is_current(turn) and session.browser_buffered_ms + duration_ms > max_buffered_ms:
+            session.audio_capacity.clear()
+            try:
+                await asyncio.wait_for(session.audio_capacity.wait(), timeout=0.05)
+            except asyncio.TimeoutError:
+                pass
+        if not session.is_current(turn):
+            return
+        sequence = session.audio_sequence.get(turn.turn_id, 0)
+        session.audio_sequence[turn.turn_id] = sequence + 1
+        try:
+            packet = struct.pack(">4s16sII", b"ELVA", bytes.fromhex(turn.turn_id), sequence, sample_rate) + payload
+        except ValueError as exc:
+            raise ValueError("Turn identity must be a 128-bit hexadecimal UUID") from exc
+        session.audio_packet_durations.setdefault(turn.turn_id, {})[sequence] = duration_ms
+        session.browser_buffered_ms += duration_ms
+        await session.outgoing.put(
+            Outbound(
+                event={
+                    "type": "audio_chunk",
+                    "turn_id": turn.turn_id,
+                    "sequence": sequence,
+                    "sample_rate": sample_rate,
+                    "encoding": "pcm_s16le_mono",
+                    "text": text if offset == 0 else "",
+                },
+                audio=packet,
+                turn_id=turn.turn_id,
+            )
         )
-    )
 
 
 async def receive_control(session: VoiceSession, payload: str) -> None:
@@ -347,6 +439,50 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
     if kind == "client_error":
         log_event("browser_error", session_id=session.session_id,
                   error=str(event.get("message", "Unknown browser error"))[:500])
+    elif kind == "playback_queue":
+        try:
+            turn = session.turns.get(turn_id)
+            sequence = event.get("sequence")
+            buffered_ms = event.get("buffered_ms")
+            consumed_ms = event.get("consumed_ms")
+            max_buffered_ms = float(getattr(runtime, "config", {}).get("audio", {}).get("max_buffered_audio_ms", 2000))
+            if (turn is None or turn is not session.current_turn or isinstance(sequence, bool)
+                    or not isinstance(sequence, int) or sequence < 0
+                    or isinstance(buffered_ms, bool) or not isinstance(buffered_ms, (int, float))
+                    or not math.isfinite(buffered_ms) or not 0 <= buffered_ms <= max_buffered_ms
+                    or isinstance(consumed_ms, bool) or not isinstance(consumed_ms, (int, float))
+                    or not math.isfinite(consumed_ms) or not 0 <= consumed_ms <= max_buffered_ms):
+                raise ValueError("invalid playback capacity acknowledgement")
+            expected = session.audio_sent_sequence.get(turn_id, -1)
+            previous_sequence = session.audio_ack_sequence.get(turn_id, -1)
+            previous_buffered = session.audio_ack_buffered_ms.get(turn_id)
+            previous_consumed = session.audio_ack_consumed_ms.get(turn_id, 0.0)
+            if sequence > expected or sequence < previous_sequence:
+                raise ValueError("out-of-order playback acknowledgement")
+            if sequence == previous_sequence and (
+                previous_buffered is None or float(buffered_ms) >= previous_buffered
+                or float(consumed_ms) <= 0
+            ):
+                raise ValueError("duplicate playback acknowledgement made no progress")
+            unacknowledged_ms = sum(
+                duration
+                for packet_sequence, duration in session.audio_packet_durations.get(turn_id, {}).items()
+                if packet_sequence > sequence
+            )
+            effective_buffered = float(buffered_ms) + unacknowledged_ms
+            if effective_buffered > max_buffered_ms:
+                raise ValueError("playback acknowledgement exceeds reserved audio capacity")
+            session.audio_ack_sequence[turn_id] = sequence
+            session.audio_ack_buffered_ms[turn_id] = float(buffered_ms)
+            session.audio_ack_consumed_ms[turn_id] = previous_consumed + float(consumed_ms)
+            for packet_sequence in tuple(session.audio_packet_durations.get(turn_id, {})):
+                if packet_sequence <= sequence:
+                    session.audio_packet_durations[turn_id].pop(packet_sequence, None)
+            session.browser_buffered_ms = effective_buffered
+            session.audio_capacity.set()
+        except (TypeError, ValueError) as exc:
+            log_event("invalid_playback_ack", session_id=session.session_id,
+                      turn_id=turn_id, error=str(exc))
     elif kind == "playback_started" and turn_id in session.turns:
         turn = session.turns[turn_id]
         turn.playback_started = True
@@ -365,6 +501,12 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         log_event("playback_finished", session_id=session.session_id, turn_id=turn_id)
         await queue_event(session, {"type": "listening"})
         session.current_turn = None
+        session.browser_buffered_ms = 0
+        session.audio_capacity.set()
+        for state in (session.audio_sequence, session.audio_ack_sequence,
+                      session.audio_ack_buffered_ms, session.audio_ack_consumed_ms,
+                      session.audio_sent_sequence, session.audio_packet_durations):
+            state.pop(turn_id, None)
     elif kind == "clear_history":
         session.history.clear()
 
@@ -386,6 +528,11 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
             log_event("barge_in", session_id=session.session_id, old_turn_id=previous.turn_id,
                       new_turn_id=turn.turn_id, playback_was_active=previous.playback_started)
             previous.cancel_event.set()
+            session.browser_buffered_ms = 0.0
+            session.audio_capacity.set()
+            for state_name in ("audio_sequence", "audio_ack_sequence", "audio_ack_buffered_ms",
+                               "audio_ack_consumed_ms", "audio_sent_sequence", "audio_packet_durations"):
+                getattr(session, state_name).pop(previous.turn_id, None)
             if previous.playback_started:
                 session.interrupt_pending[previous.turn_id] = turn.speech_onset_at
             clear_outgoing(session)
@@ -472,9 +619,18 @@ async def voice_socket(websocket: WebSocket) -> None:
         session.stopped = True
         for turn in session.turns.values():
             turn.cancel_event.set()
-        if session.tasks:
-            await asyncio.gather(*tuple(session.tasks), return_exceptions=True)
         sender.cancel()
+        clear_outgoing(session)
+        for task in tuple(session.tasks):
+            task.cancel()
+        if session.tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tuple(session.tasks), return_exceptions=True), timeout=2
+                )
+            except asyncio.TimeoutError:
+                log_event("session_cleanup_timeout", session_id=session.session_id,
+                          active_turn_tasks=sum(not task.done() for task in session.tasks))
         with suppress(asyncio.CancelledError, WebSocketDisconnect):
             await sender
         async with session_lock:

@@ -27,6 +27,10 @@ let cancelledTurns = new Set();
 let messageNodes = new Map();
 let playbackSources = new Map();
 let nextPlaybackTime = new Map();
+let audioSequence = new Map();
+let playbackBufferedMs = new Map();
+let outputGain = null;
+let volumeMuted = false;
 let echoCancellationSetting = "not checked";
 
 function setStatus(label, state = "") {
@@ -90,6 +94,12 @@ function stopPlayback(turnId = null) {
     }
     playbackSources.delete(id);
     nextPlaybackTime.delete(id);
+    playbackBufferedMs.delete(id);
+    audioSequence.delete(id);
+  }
+  if (!turnId) {
+    playbackBufferedMs.clear();
+    audioSequence.clear();
   }
   if (!turnId || currentResponseTurn === turnId) currentResponseTurn = null;
 }
@@ -115,6 +125,8 @@ function finishPlayback(turnId) {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "playback_finished", turn_id: turnId }));
   }
+  playbackBufferedMs.delete(turnId);
+  audioSequence.delete(turnId);
   if (currentResponseTurn === turnId) currentResponseTurn = null;
   liveLabel.textContent = sessionWanted ? "LISTENING" : "MIC OFF";
   vadIndicator.classList.remove("active");
@@ -146,14 +158,39 @@ async function playPCM(buffer, metadata) {
   if (peak < 0.0001) reportClientError(`Generated audio chunk is silent (${buffer.byteLength} bytes)`);
   const source = audioContext.createBufferSource();
   source.buffer = audioBuffer;
-  source.connect(audioContext.destination);
+  if (!outputGain) {
+    outputGain = audioContext.createGain();
+    outputGain.gain.value = volumeMuted ? 0 : Number(document.querySelector("#volume-control")?.value || 1);
+    outputGain.connect(audioContext.destination);
+  }
+  source.connect(outputGain);
   const sources = playbackSources.get(turnId) || new Set();
   playbackSources.set(turnId, sources);
   sources.add(source);
   const scheduledAt = Math.max(audioContext.currentTime + 0.015, nextPlaybackTime.get(turnId) || 0);
   nextPlaybackTime.set(turnId, scheduledAt + audioBuffer.duration);
+  const sequence = metadata.sequence;
+  const bufferedMs = Math.max(0, (nextPlaybackTime.get(turnId) - audioContext.currentTime) * 1000);
+  const previousBufferedMs = playbackBufferedMs.get(turnId) || 0;
+  const consumedMs = Math.max(0, previousBufferedMs + audioBuffer.duration * 1000 - bufferedMs);
+  playbackBufferedMs.set(turnId, bufferedMs);
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "playback_queue", turn_id: turnId, sequence,
+      consumed_ms: consumedMs,
+      buffered_ms: bufferedMs }));
+  }
   source.onended = () => {
     sources.delete(source);
+    if (!cancelledTurns.has(turnId) && socket?.readyState === WebSocket.OPEN) {
+      const updatedBufferedMs = Math.max(0,
+        ((nextPlaybackTime.get(turnId) || audioContext.currentTime) - audioContext.currentTime) * 1000);
+      const previous = playbackBufferedMs.get(turnId) || 0;
+      playbackBufferedMs.set(turnId, updatedBufferedMs);
+      socket.send(JSON.stringify({ type: "playback_queue", turn_id: turnId,
+        sequence: audioSequence.get(turnId) ?? 0,
+        consumed_ms: Math.max(0, previous - updatedBufferedMs),
+        buffered_ms: updatedBufferedMs }));
+    }
     if (sources.size === 0) {
       playbackSources.delete(turnId);
       if (turnComplete.has(turnId)) finishPlayback(turnId);
@@ -181,9 +218,27 @@ async function playPCM(buffer, metadata) {
 
 async function handleServerMessage(data) {
   if (data instanceof ArrayBuffer) {
-    const metadata = pendingAudio;
-    pendingAudio = null;
-    if (metadata?.turn_id === currentResponseTurn || !currentResponseTurn) await playPCM(data, metadata);
+    try {
+      if (data.byteLength < 30 || data.byteLength % 2 !== 0) throw new Error("Truncated audio packet");
+      const view = new DataView(data);
+      if (String.fromCharCode(...new Uint8Array(data, 0, 4)) !== "ELVA") throw new Error("Invalid audio packet marker");
+      const turnId = [...new Uint8Array(data, 4, 16)].map(value => value.toString(16).padStart(2, "0")).join("");
+      const sequence = view.getUint32(20, false);
+      const sampleRate = view.getUint32(24, false);
+      const previous = audioSequence.get(turnId);
+      if (sampleRate !== 24000 || (previous !== undefined && sequence !== previous + 1)) {
+        throw new Error("Invalid audio packet rate or sequence");
+      }
+      if (cancelledTurns.has(turnId)) return;
+      const payload = data.slice(28);
+      if (!payload.byteLength || payload.byteLength > 24000 * 2 * 2) throw new Error("Invalid audio packet length");
+      audioSequence.set(turnId, sequence);
+      const previousBuffered = Math.max(0, ((nextPlaybackTime.get(turnId) || 0) - (audioContext?.currentTime || 0)) * 1000);
+      await playPCM(payload, { turn_id: turnId, sequence, sample_rate: sampleRate,
+        previous_buffered_ms: previousBuffered });
+    } catch (error) {
+      reportClientError(`Rejected audio packet: ${error.message || error}`);
+    }
     return;
   }
   let event;
@@ -220,9 +275,6 @@ async function handleServerMessage(data) {
       break;
     case "text_delta":
       appendAssistantText(event.turn_id, event.text);
-      break;
-    case "audio_chunk":
-      pendingAudio = event;
       break;
     case "turn_complete":
       turnComplete.add(event.turn_id);
@@ -286,11 +338,14 @@ function connectSocket() {
       }));
       resolve();
     };
-    ws.onmessage = event => { void handleServerMessage(event.data); };
+    ws.onmessage = event => {
+      if (socket === ws) void handleServerMessage(event.data);
+    };
     ws.onerror = () => {
       if (!opened) reject(new Error("Could not connect to the local voice service"));
     };
     ws.onclose = () => {
+      if (socket !== ws) return;
       if (socket === ws) socket = null;
       pendingAudio = null;
       stopPlayback();
@@ -400,6 +455,7 @@ async function stopSession(userInitiated = true) {
   }
   socket = null;
   await releaseAudio();
+  outputGain = null;
   stopButton.hidden = true;
   startButton.hidden = false;
   startButton.disabled = false;
@@ -434,6 +490,7 @@ function renderDiagnostics(status) {
     ["Echo cancellation", echoCancellationSetting],
     ["Response latency p50 / p95", formatMetric(status.metrics?.speech_end_to_first_audio_ms)],
     ["Interrupt latency p50 / p95", formatMetric(status.metrics?.speech_onset_to_playback_stopped_ms)],
+    ["Browser audio queue limit", `${status.audio?.max_buffered_audio_ms || 2000} ms`],
   ];
   for (const [label, value] of rows) {
     const row = document.createElement("div");
@@ -442,6 +499,17 @@ function renderDiagnostics(status) {
     diagnostics.append(row);
   }
 }
+
+document.querySelector("#mute-button").addEventListener("click", event => {
+  volumeMuted = !volumeMuted;
+  if (outputGain) outputGain.gain.value = volumeMuted ? 0 : Number(document.querySelector("#volume-control").value);
+  const button = event?.currentTarget || document.querySelector("#mute-button");
+  button.setAttribute("aria-pressed", String(volumeMuted));
+  button.textContent = volumeMuted ? "Unmute" : "Mute";
+});
+document.querySelector("#volume-control").addEventListener("input", event => {
+  if (outputGain && !volumeMuted) outputGain.gain.value = Number(event.currentTarget.value);
+});
 
 function formatMetric(metric) {
   if (!metric || metric.p50 == null) return "not measured";

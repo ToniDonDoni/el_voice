@@ -183,14 +183,22 @@ def make_langchain_search_tool(search: WebSearch, observer=None):
                          duration_ms=round((time.monotonic() - started_at) * 1000, 1))
             return payload
         except Exception as exc:
+            # A failed search is a tool result, not a reason to discard other
+            # successful parallel searches or abort the agent's whole turn.
+            code = getattr(exc, "code", None)
+            error_code = code if code in {
+                "search_unavailable", "search_timeout",
+                "search_rate_limited", "invalid_search_query",
+            } else "search_unavailable"
             if observer:
-                code = getattr(exc, "code", None)
-                error_code = str(code if isinstance(code, str) else type(exc).__name__)[:100]
                 observer("tool_call_failed", tool_name="web_search",
                          tool_invocation_id=invocation_id, tool_call_id=call_id,
                          error_code=error_code,
                          duration_ms=round((time.monotonic() - started_at) * 1000, 1))
-            raise
+            # LangChain delivers this structured payload as a paired ToolMessage.
+            # The model can retry, use earlier sources, or disclose uncertainty.
+            return json.dumps({"query": query[:240], "results": [],
+                               "error": error_code}, ensure_ascii=False)
 
     # Resolve the injected runtime annotation before tool() inspects this
     # locally defined function (annotations are postponed in this module).

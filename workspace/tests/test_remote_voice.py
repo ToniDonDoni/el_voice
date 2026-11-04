@@ -458,6 +458,42 @@ class StreamingContractTests(unittest.TestCase):
             self.assertIn("a" * 32, service.contexts.sessions)
             active.active_task = None
 
+    def test_cold_burst_stream_keeps_terminal_done_after_slow_context_save(self):
+        class BurstProvider:
+            async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
+                for _ in range(14):
+                    yield {"type": "delta", "text": "chunk"}
+
+            async def close(self):
+                pass
+
+        service = LLMService(BurstProvider(), mode="remote")
+        original_remember = service.contexts.remember
+
+        def slow_remember(*args, **kwargs):
+            import time
+            time.sleep(0.15)
+            return original_remember(*args, **kwargs)
+
+        service.contexts.remember = slow_remember
+        application = create_app(service)
+        endpoint = next(route.endpoint for route in application.routes
+                        if getattr(route, "path", "").endswith("/stream"))
+
+        async def consume():
+            response = await endpoint("c" * 32, "d" * 32, TurnRequest(text="cold"))
+            body = response.body_iterator
+            try:
+                return [json.loads(line) async for line in body]
+            finally:
+                await body.aclose()
+
+        events = asyncio.run(consume())
+        self.assertEqual(sum(item["type"] == "delta" for item in events), 14)
+        self.assertEqual([item["type"] for item in events].count("done"), 1)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertTrue(all(item["turn_id"] == "d" * 32 for item in events))
+
     def test_stream_reaches_eof_after_backpressured_burst(self):
         class BurstProvider:
             async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):

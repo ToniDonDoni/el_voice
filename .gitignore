@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.pyc
+models/*
+!models/.gitkeep
+data/*
+!data/.gitkeep
+work/
+# Reference archives
+*.mht
+*.mhtml

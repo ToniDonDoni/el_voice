@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
 
 try:
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -68,6 +69,32 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("What should I buy against Axe?", [message.content for message in seen])
         self.assertIn("Silver Edge can help against Berserker's Call.", [message.content for message in seen])
         self.assertIn("Find a current guide for that item", [message.content for message in seen])
+
+    async def test_cancel_closes_graph_before_turn_context_reset(self):
+        closed = []
+
+        class FakeGraph:
+            async def astream(self, _state, **_kwargs):
+                try:
+                    yield ("updates", {"model": {"messages": [AIMessage(content="Hello")]}})
+                    await asyncio.Event().wait()
+                finally:
+                    closed.append(True)
+
+        provider = object.__new__(OpenCodeLangChainProvider)
+        provider.model = object()
+        provider.search_tool = object()
+        provider.tool_iterations = 3
+        with patch("langchain.agents.create_agent", return_value=FakeGraph()):
+            response = provider.stream(
+                "hello", [], asyncio.Event(), session_id="a" * 32,
+                turn_id="b" * 32,
+            )
+            first = await anext(response)
+            self.assertEqual(first, {"type": "delta", "text": "Hello"})
+            await response.aclose()
+        self.assertEqual(closed, [True])
+        self.assertEqual(provider._trace_id.get(), "")
 
     def test_mixed_tool_call_message_is_rebuilt_with_only_matched_ids(self):
         call = AIMessage(content="", tool_calls=[

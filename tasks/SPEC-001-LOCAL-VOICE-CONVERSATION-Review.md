@@ -129,5 +129,22 @@ Implemented on branch `DeepSeek-Flash` with local evidence:
   `stopAll()` on socket close; verified by `tests/playback.test.mjs` and the selftest
   abrupt-disconnect check.
 
+Additional evidence and remaining gaps:
+
+- R4 parity now uses the official `silero-vad==5.1.2` package `OnnxWrapper` (not a
+  hand-written reference); probabilities and reset are compared on the real ONNX model.
+  Segment-boundary parity is documented as a deviation: the project uses its own
+  endpointing segmenter, so only probabilities and streaming state are compared.
+- R2 STT/VAD 44.1-vs-48 parity is not automated yet; the alias suppression is verified
+  numerically (10 kHz residual RMS 0.092 at the 16 kHz output). A WAV-based STT/VAD
+  comparison remains a browser/audio-acceptance item.
+- R5 client-side evidence is module level (`static/playback.js` with a fake
+  AudioContext) plus the server abrupt-disconnect check. The client calls `stopAll()`
+  synchronously in the socket `onclose` handler; the expected audible bound is one
+  event-loop turn (well under 100 ms) but must be confirmed in a real browser.
+  Manual browser checks: force-close/reload the tab during playback, disable the
+  network mid-answer, reconnect and confirm no old speech continues; measure the stop
+  delay.
+
 Browser/microphone acceptance (headphones echo behaviour, audible interruption, real
 latency) still has to be run on the target Mac; Docker is unavailable in this environment.

@@ -62,6 +62,19 @@ def wait_http_ready(url: str, timeout: float = 240.0) -> dict:
     raise SystemExit(f"service did not become available: {last_error}")
 
 
+def wait_server_started(server, thread: threading.Thread, name: str,
+                        timeout: float = 15.0) -> None:
+    """Fail fast when a port is already in use instead of using the old process."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if getattr(server, "started", False):
+            return
+        if not thread.is_alive():
+            raise SystemExit(f"{name} failed to start (is its port already in use?)")
+        time.sleep(0.05)
+    raise SystemExit(f"{name} did not start within {timeout:.0f} s")
+
+
 def wait_llm_ready(base_url: str, timeout: float = 240.0) -> dict:
     deadline = time.monotonic() + timeout
     status: dict = {}
@@ -423,6 +436,7 @@ def main() -> int:
     llm_thread = threading.Thread(target=llm_server.run, daemon=True)
     llm_thread.start()
     try:
+        wait_server_started(llm_server, llm_thread, "LLM service")
         wait_http_ready(f"http://{args.host}:{args.llm_port}/healthz")
         llm_status = wait_llm_ready(f"http://{args.host}:{args.llm_port}")
         print(
@@ -444,6 +458,7 @@ def main() -> int:
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
+        wait_server_started(server, thread, "voice service")
         wait_http_ready(f"http://{args.host}:{args.port}/healthz")
         wait_pipeline_ready(f"http://{args.host}:{args.port}")
         return asyncio.run(run_check(args.port, models_root, cfg))

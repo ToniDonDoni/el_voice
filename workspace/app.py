@@ -321,11 +321,15 @@ async def websocket_session(websocket: WebSocket) -> None:
                     STATE.active = None
                 session = None
             elif kind == "playback_done" and session is not None:
-                await session.playback_done(int(payload.get("turn_id", -1)))
+                turn_id = payload.get("turn_id")
+                if isinstance(turn_id, int) and not isinstance(turn_id, bool):
+                    await session.playback_done(turn_id)
             elif kind == "playback_stopped" and session is not None:
-                session.client_playback_stopped(
-                    int(payload.get("turn_id", -1)), float(payload.get("elapsed_ms", -1)),
-                )
+                turn_id = payload.get("turn_id")
+                elapsed = payload.get("elapsed_ms")
+                if (isinstance(turn_id, int) and not isinstance(turn_id, bool)
+                        and isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool)):
+                    session.client_playback_stopped(turn_id, float(elapsed))
             elif kind == "ping":
                 await send_json({"type": "pong"})
     except WebSocketDisconnect:

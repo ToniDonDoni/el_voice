@@ -21,6 +21,7 @@ import struct
 import threading
 import time
 
+from .engines import EngineError
 from .llm_client import LlmClientError
 from .tts import SpeakableChunker
 from .turnids import TurnIdSource

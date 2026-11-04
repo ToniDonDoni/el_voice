@@ -66,6 +66,10 @@ def _block(raw: dict, key: str) -> dict:
 def validate_settings(raw: dict) -> dict:
     """Validate cross-component constraints and return the configuration."""
     audio = _block(raw, "audio")
+    # Older settings files predate the conversation follow-up; apply defaults
+    # instead of failing validation so upgrades keep working.
+    if not isinstance(raw.get("conversation"), dict):
+        raw["conversation"] = {"history_turns": 4, "max_prompt_chars": 4000}
     conversation = _block(raw, "conversation")
     vad = _block(raw, "vad")
     stt = _block(raw, "stt")

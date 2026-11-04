@@ -41,6 +41,11 @@ UTTERANCES = (
 )
 
 
+def fetch_json(url: str, timeout: float = 5.0) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
 def wait_http_ready(url: str, timeout: float = 240.0) -> dict:
     deadline = time.monotonic() + timeout
     last_error = ""
@@ -268,6 +273,61 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
         record("no stale audio from the interrupted turn after flush", stale_after_flush == 0,
                f"{stale_after_flush} late chunks")
         await harness.send_json({"type": "playback_done", "turn_id": candidate})
+        max_turn_id = candidate or flush_turn
+
+        # --- conversation context across consecutive clean turns ---------
+        for clip, label in ((audio[0], "context first"), (audio[2], "context follow-up")):
+            await harness.feed_pcm(clip)
+            context_turn = None
+            context_text = None
+            ended = False
+            while not ended:
+                message = await harness.expect(lambda item: True, timeout=120)
+                kind = json_type(message)
+                if kind == "user_text":
+                    payload = json.loads(message)
+                    max_turn_id = max(max_turn_id, payload["turn_id"])
+                    context_text = payload["text"]
+                elif kind == "turn_end":
+                    payload = json.loads(message)
+                    max_turn_id = max(max_turn_id, payload["turn_id"])
+                    context_turn = payload["turn_id"]
+                    ended = True
+                elif kind == "error":
+                    record(f"{label} turn completed", False, json.loads(message)["message"])
+                    ended = True
+            if context_text is not None:
+                record(f"{label} turn transcribed", True, context_text[:60])
+            await harness.send_json({"type": "playback_done", "turn_id": context_turn})
+
+        # Public status must expose content-free prompt metadata: the previous
+        # completed exchange must be part of the prompt for the next turn.
+        status_mid = await asyncio.to_thread(fetch_json, f"http://127.0.0.1:{port}/api/status")
+        last_prompt = (status_mid.get("session") or {}).get("last_prompt") or {}
+        record("conversation context is part of the prompt",
+               int(last_prompt.get("history_turns", 0)) >= 2,
+               f"history_turns={last_prompt.get('history_turns')} chars={last_prompt.get('chars')}")
+
+        await harness.send_json({"type": "stop"})
+        await harness.close()
+
+    # --- a new session must not reuse turn ids ---------------------------
+    async with websockets.connect(uri, max_size=None) as websocket:
+        harness = WsHarness(websocket)
+        await harness.send_json({"type": "start"})
+        await harness.expect(lambda message: json_type(message) == "ready", timeout=200)
+        await harness.feed_pcm(audio[1])
+        new_turn_id = None
+        for _ in range(400):
+            message = await harness.expect(lambda item: True, timeout=120)
+            if json_type(message) == "user_text":
+                new_turn_id = json.loads(message)["turn_id"]
+                break
+            if json_type(message) == "error":
+                break
+        record("turn ids continue across a new session",
+               new_turn_id is not None and new_turn_id > max_turn_id,
+               f"new={new_turn_id} previous_max={max_turn_id}")
         await harness.send_json({"type": "stop"})
         await harness.close()
 

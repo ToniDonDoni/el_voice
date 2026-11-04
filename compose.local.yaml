@@ -1,0 +1,45 @@
+name: el-voice
+
+services:
+  voice:
+    environment:
+      EL_VOICE_MODE: local
+      LLM_SERVICE_URL: http://llm:8001
+    depends_on:
+      llm:
+        condition: service_healthy
+
+  llm:
+    image: el-voice:dev
+    platform: linux/arm64
+    build:
+      context: .
+    command: [python, -m, uvicorn, llm_service.app:app, --app-dir, /workspace, --host, 0.0.0.0, --port, "8001"]
+    environment:
+      EL_VOICE_MODE: local
+      EL_VOICE_LOCAL_MODEL: /models/llm/gemma-3-1b-it-Q4_K_M.gguf
+      LLM_CONTEXT_TOKEN_BUDGET: "2400"
+      LLM_MAX_RESPONSE_TOKENS: "192"
+      LLM_CPU_THREADS: "4"
+    volumes:
+      - ./workspace:/workspace:ro
+      - ./models:/models:ro
+    networks: [private]
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 4
+    mem_limit: 6g
+    pids_limit: 128
+    stop_grace_period: 15s
+    healthcheck:
+      test: [CMD, python, -c, "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8001/healthz',timeout=3)); assert d.get('ready')"]
+      interval: 10s
+      timeout: 5s
+      start_period: 180s
+      retries: 5
+
+  download:
+    command: [python, /opt/el-voice/download_models.py]

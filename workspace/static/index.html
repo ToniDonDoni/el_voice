@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css?v=spec-001-review">
-  <script src="/static/app.js?v=spec-001-review" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=spec-002-remote">
+  <script src="/static/app.js?v=spec-002-remote" defer></script>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
       <a class="brand" href="/" aria-label="EL Voice home"><span class="brand-mark">EL</span><span>EL Voice</span></a>
-      <span class="local-tag"><span class="local-dot"></span>LOCAL · PRIVATE</span>
+      <span id="mode-badge" class="local-tag"><span class="local-dot"></span>LOADING MODE</span>
     </header>
 
     <section class="hero" aria-labelledby="title">
@@ -48,7 +48,7 @@
       </div>
     </section>
 
-    <aside class="headphone-note" role="note">
+    <aside id="privacy-note" class="headphone-note" role="note">
       <span class="note-icon">⌁</span>
       <p><strong>Use headphones for this version.</strong> Browser echo cancellation is best effort; speakers can make the assistant hear its own voice.</p>
     </aside>
@@ -58,7 +58,7 @@
       <div id="diagnostics-content" class="diagnostics-content">Loading status…</div>
     </details>
 
-    <footer>Runs on your Mac · CPU inference in Docker · No cloud audio</footer>
+    <footer id="footer-mode">Runs on your Mac · Speech audio stays in this Docker environment</footer>
   </main>
 </body>
 </html>

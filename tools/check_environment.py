@@ -17,12 +17,19 @@ def main():
     # Load Torch first so its bundled OpenBLAS is registered before native inference
     # packages can load another library with the same SONAME.
     for name in ("torch", "fastapi", "uvicorn", "websockets", "numpy", "av",
-                 "ctranslate2", "faster_whisper", "llama_cpp", "huggingface_hub"):
+                 "ctranslate2", "faster_whisper", "llama_cpp", "huggingface_hub",
+                 "httpx", "langchain", "langchain_openai", "ddgs", "tiktoken"):
         try:
             module = importlib.import_module(name)
             print(f"OK {name}: {getattr(module, '__version__', 'imported')}")
             if name == "torch" and module.version.cuda is not None:
                 failures.append("Expected CPU-only PyTorch")
+            if name == "tiktoken":
+                try:
+                    module.get_encoding("cl100k_base").encode("offline tokenizer check")
+                    print("OK tiktoken encoding: cl100k_base available without runtime download")
+                except Exception as exc:
+                    failures.append(f"tiktoken offline encoding: {exc}")
         except Exception as exc:
             failures.append(f"{name}: {exc}")
     if not args.skip_models:

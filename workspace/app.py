@@ -150,6 +150,12 @@ async def queue_event(session: VoiceSession, event: dict[str, Any], turn_id: str
     await session.outgoing.put(Outbound(event=event, turn_id=turn_id))
 
 
+async def clear_llm_context(session_id: str) -> None:
+    clear = getattr(runtime, "clear_llm_session", None)
+    if clear is not None:
+        await clear(session_id)
+
+
 def clear_outgoing(session: VoiceSession) -> None:
     while True:
         try:
@@ -237,7 +243,21 @@ def _speakable_chunks(buffer: str, max_chars: int = 80, min_chars: int = 18) -> 
 
 
 async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
-    """Consume a single-threaded llama.cpp stream through a bounded async queue."""
+    """Consume a bounded text/tool/source event stream from the LLM service."""
+    if getattr(runtime, "llm_client", None) is not None:
+        stream = runtime.llm_stream(
+            user_text, turn.cancel_event, session.history,
+            session_id=session.session_id, turn_id=turn.turn_id,
+        )
+    else:
+        stream = runtime.llm_stream(user_text, turn.cancel_event, session.history)
+    if hasattr(stream, "__aiter__"):
+        async for event in stream:
+            if not session.is_current(turn):
+                return
+            yield {"type": "delta", "text": event} if isinstance(event, str) else event
+        return
+
     loop = asyncio.get_running_loop()
     items: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=4)
 
@@ -252,7 +272,7 @@ async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
 
     def worker() -> None:
         try:
-            for delta in runtime.llm_stream(user_text, turn.cancel_event, session.history):
+            for delta in stream:
                 if turn.cancel_event.is_set() or not push("delta", delta):
                     break
             push("done", None)
@@ -268,7 +288,7 @@ async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
             if kind == "error":
                 error_name, detail = value
                 raise RuntimeError(f"{error_name}: {detail}")
-            yield value
+            yield {"type": "delta", "text": value}
     finally:
         if turn.cancel_event.is_set() or session.stopped:
             while not worker_task.done():
@@ -311,10 +331,28 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         async for delta in _llm_items(session, turn, text):
             if not session.is_current(turn):
                 return
-            answer_parts.append(delta)
-            text_buffer += delta
+            if delta.get("type") == "sources":
+                await queue_event(session, {
+                    "type": "sources", "turn_id": turn.turn_id,
+                    "sources": delta.get("sources", [])[:5],
+                }, turn.turn_id)
+                continue
+            if delta.get("type") == "tool_call":
+                await queue_event(session, {
+                    "type": "tool_call", "turn_id": turn.turn_id,
+                    "name": delta.get("name", "web_search"),
+                    "result_count": min(5, max(0, int(delta.get("result_count", 0)))),
+                }, turn.turn_id)
+                continue
+            if delta.get("type") != "delta":
+                continue
+            delta_text = str(delta.get("text", ""))
+            if not delta_text:
+                continue
+            answer_parts.append(delta_text)
+            text_buffer += delta_text
             await queue_event(
-                session, {"type": "text_delta", "turn_id": turn.turn_id, "text": delta}, turn.turn_id
+                session, {"type": "text_delta", "turn_id": turn.turn_id, "text": delta_text}, turn.turn_id
             )
             chunks, text_buffer = _speakable_chunks(
                 text_buffer,
@@ -336,10 +374,13 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             await synthesize_and_queue(session, turn, final_chunk)
         answer = "".join(answer_parts).strip()
         if answer and session.is_current(turn):
-            session.history.extend(
-                [{"role": "user", "content": text}, {"role": "assistant", "content": answer}]
-            )
-            session.history = session.history[-8:]
+            # The production LLM service owns context; legacy test runtimes use this fallback.
+            if getattr(runtime, "llm_client", None) is None:
+                session.history.extend([
+                    {"role": "user", "content": text},
+                    {"role": "assistant", "content": answer},
+                ])
+                session.history = session.history[-8:]
             log_event("assistant_reply", session_id=session.session_id, turn_id=turn.turn_id, text=answer)
             reply_logged = True
         await queue_event(session, {"type": "turn_complete", "turn_id": turn.turn_id}, turn.turn_id)
@@ -355,7 +396,9 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
         if session.is_current(turn):
             await queue_event(
                 session,
-                {"type": "error", "turn_id": turn.turn_id, "message": "A local voice component failed.", "code": type(exc).__name__},
+                {"type": "error", "turn_id": turn.turn_id,
+                 "message": "The assistant could not complete this turn.",
+                 "code": getattr(exc, "code", type(exc).__name__)},
                 turn.turn_id,
             )
     finally:
@@ -509,6 +552,7 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
             state.pop(turn_id, None)
     elif kind == "clear_history":
         session.history.clear()
+        await clear_llm_context(session.session_id)
 
 
 async def receive_audio(session: VoiceSession, payload: bytes) -> None:
@@ -631,6 +675,7 @@ async def voice_socket(websocket: WebSocket) -> None:
             except asyncio.TimeoutError:
                 log_event("session_cleanup_timeout", session_id=session.session_id,
                           active_turn_tasks=sum(not task.done() for task in session.tasks))
+        await clear_llm_context(session.session_id)
         with suppress(asyncio.CancelledError, WebSocketDisconnect):
             await sender
         async with session_lock:

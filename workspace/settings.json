@@ -10,13 +10,6 @@
     "language": "ru",
     "cpu_threads": 4
   },
-  "llm": {
-    "model": "llm/gemma-3-1b-it-Q4_K_M.gguf",
-    "context_tokens": 3072,
-    "cpu_threads": 4,
-    "batch_tokens": 256,
-    "max_response_tokens": 192
-  },
   "vad": {
     "implementation": "faster-whisper bundled Silero VAD v6 ONNX",
     "sample_rate": 16000,

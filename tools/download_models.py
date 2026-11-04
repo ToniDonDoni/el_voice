@@ -49,8 +49,16 @@ def main():
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("EL_VOICE_MODELS", "/models")))
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--only", nargs="+", help="limit verification/download to matching paths or directories")
     args = parser.parse_args()
     assets = get_manifest()
+    if args.only:
+        assets = [asset for asset in assets if any(
+            asset["path"] == item or asset["path"].startswith(item.rstrip("/") + "/")
+            for item in args.only
+        )]
+        if not assets:
+            raise ValueError("--only did not match any configured model assets")
     if args.list:
         for asset in assets:
             print(f"{asset['path']}\n  {asset['url']}")

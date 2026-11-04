@@ -83,6 +83,41 @@ function addMessageStatus(turnId, text) {
   status.textContent = text;
 }
 
+function addSources(turnId, sources) {
+  const article = messageNodes.get(`assistant:${turnId}`)?.article;
+  if (!article || !Array.isArray(sources)) return;
+  article.querySelector(".source-list")?.remove();
+  const valid = sources.filter(source => {
+    try { return new URL(source.url).protocol === "https:"; } catch (_) { return false; }
+  }).slice(0, 5);
+  if (!valid.length) return;
+  const section = document.createElement("section");
+  section.className = "source-list";
+  const heading = document.createElement("div");
+  heading.className = "source-heading";
+  heading.textContent = "Web sources";
+  section.append(heading);
+  const list = document.createElement("ul");
+  for (const source of valid) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = source.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = String(source.title || "Source").slice(0, 200);
+    item.append(link);
+    if (source.snippet) {
+      const snippet = document.createElement("p");
+      snippet.textContent = String(source.snippet).slice(0, 500);
+      item.append(snippet);
+    }
+    list.append(item);
+  }
+  section.append(list);
+  article.append(section);
+  scrollMessages();
+}
+
 function stopPlayback(turnId = null) {
   const ids = turnId ? [turnId] : [...playbackSources.keys()];
   for (const id of ids) {
@@ -272,6 +307,15 @@ async function handleServerMessage(data) {
       assistantBody(event.turn_id);
       setStatus("Thinking…", "busy");
       liveLabel.textContent = "THINKING";
+      break;
+    case "tool_call":
+      addMessageStatus(event.turn_id, "Searching the web…");
+      break;
+    case "sources":
+      addSources(event.turn_id, event.sources);
+      addMessageStatus(event.turn_id, event.sources?.length
+        ? `Grounded with ${event.sources.length} web source${event.sources.length === 1 ? "" : "s"}`
+        : "Search returned no sources");
       break;
     case "text_delta":
       appendAssistantText(event.turn_id, event.text);
@@ -481,6 +525,7 @@ async function clearChat() {
 function renderDiagnostics(status) {
   diagnostics.replaceChildren();
   const rows = [
+    ["Voice mode", status.mode === "remote" ? "Remote — text sent to provider" : "Local — offline inference"],
     ["Platform", `${status.system || "—"} ${status.architecture || ""}`],
     ["Pipeline", status.stage || "unknown"],
     ["VAD", status.models?.vad || "unknown"],
@@ -521,16 +566,32 @@ async function pollStatus() {
     const response = await fetch("/api/status", { cache: "no-store" });
     const status = await response.json();
     renderDiagnostics(status);
+    const remote = status.mode === "remote";
+    const badge = document.querySelector("#mode-badge");
+    badge.replaceChildren(Object.assign(document.createElement("span"), { className: "local-dot" }));
+    badge.append(document.createTextNode(remote ? "REMOTE · TEXT SHARED" : "LOCAL · PRIVATE"));
+    const note = document.querySelector("#privacy-note p");
+    if (remote) {
+      note.replaceChildren();
+      const strong = document.createElement("strong");
+      strong.textContent = "Remote Voice sends text to OpenCode Go.";
+      note.append(strong, document.createTextNode(
+        " Microphone audio stays local. Recognized text and bounded history go to OpenCode Go; search queries and result snippets may be sent to OpenCode Go and DuckDuckGo. Use headphones; echo cancellation is best effort."
+      ));
+      document.querySelector("#footer-mode").textContent = "Remote text inference and web search · Speech audio stays local";
+    } else {
+      document.querySelector("#footer-mode").textContent = "Runs on your Mac · CPU inference in Docker · No remote text or audio";
+    }
     if (!sessionWanted) {
       if (status.ready) {
         startButton.disabled = false;
-        setStatus("Local models ready", "ready");
+        setStatus(remote ? "Remote Voice ready" : "Local Voice ready", "ready");
       } else if (status.stage === "error") {
         startButton.disabled = true;
-        setStatus(`Local pipeline failed to initialize (${status.error || "unknown error"})`, "error");
+        setStatus(`${remote ? "Remote" : "Local"} voice pipeline failed to initialize (${status.error || "unknown error"})`, "error");
       } else {
         startButton.disabled = true;
-        setStatus("Loading local models…", "busy");
+        setStatus(remote ? "Connecting remote language service…" : "Loading local voice models…", "busy");
       }
     }
   } catch (_) {

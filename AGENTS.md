@@ -2,9 +2,10 @@
 
 ## Scope and ownership
 
-- This is an independent local voice assistant for Docker Desktop on Apple Silicon.
+- This is an independent Dota voice assistant for Docker Desktop on Apple Silicon.
 - Never copy code, installers, packages, model mirrors, or binary builds from the previously reviewed assistant author.
-- Use upstream Python packages and model publishers. No cloud inference or API keys.
+- Use upstream Python packages and model publishers. Local Voice is offline and requires no API keys.
+- SPEC-002 explicitly adds opt-in Remote Voice: only the dedicated LLM service receives the provider key and outbound HTTPS; recognized text, bounded context, and search data may leave the Mac. Microphone audio and TTS remain local. Do not weaken this separation or pass the key to the voice or proxy services.
 - Keep source code and project documentation in English.
 - Work on a dedicated branch. Preserve unrelated edits.
 
@@ -24,7 +25,8 @@
 ## Current milestone
 
 The browser conversation pipeline is implemented in the mounted `workspace/` source and runs
-in the prepared image. It uses bundled Silero ONNX VAD, local Whisper, Gemma, and Silero `b_lez`.
+in the prepared image. It uses bundled Silero ONNX VAD, local Whisper, an internal LLM service
+(Gemma for Local Voice or OpenCode Go for Remote Voice), and Silero `b_lez`.
 Local stdout logs include recognized text, assistant replies, and diagnostic errors at the user's
 request; audio payloads must never be logged or persisted. Continue verifying browser playback,
 barge-in, and latency acceptance scenarios without rebuilding unless dependencies change.
@@ -36,9 +38,12 @@ barge-in, and latency acceptance scenarios without rebuilding unless dependencie
   the voice service's port 8000 is never published directly.
 - Browser microphone capture and playback run on the Mac; no host audio-device mount.
 - The voice service uses an internal network and has no direct host-published port. Nginx
-  joins that network and a bridge network to publish the browser endpoint. Nginx's bridge
-  permits potential outbound access; its fixed upstream config only forwards to `voice`, but
-  this is not a network egress-isolation boundary. The download service uses egress for models.
+  joins internal networks to publish the browser endpoint and has no outbound bridge.
+- Local LLM joins only the internal network and mounts Gemma read-only. Remote LLM joins the
+  internal network plus an outbound bridge and is the only runtime service with provider-key
+  access. The download service uses egress only during model preparation.
+- Local and Remote Voice are separate Compose override files. Always stop one mode before
+  starting the other; both use the same host port and service names.
 - Never mount the home directory, Docker socket, credentials, or unrelated projects.
 - Model downloads must not load or execute model packages.
 - Treat Silero packages as executable pickle content; load only the configured publisher asset.

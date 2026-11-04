@@ -6,10 +6,13 @@ FROM ${PYTHON_IMAGE} AS builder
 ARG TARGETARCH
 RUN test "$TARGETARCH" = arm64
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
 RUN python -m venv /opt/venv
 COPY requirements.lock /tmp/requirements.lock
 RUN /opt/venv/bin/python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock \
-    && /opt/venv/bin/python -m pip check
+    && /opt/venv/bin/python -m pip check \
+    && mkdir -p "$TIKTOKEN_CACHE_DIR" \
+    && /opt/venv/bin/python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 
 FROM ${PYTHON_IMAGE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -21,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown elvoice:elvoice /workspace /models /data
 
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/tiktoken /opt/tiktoken
 COPY tools/check_environment.py tools/download_models.py models.json /opt/el-voice/
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
@@ -30,6 +34,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     DO_NOT_TRACK=1 \
     HF_HOME=/data/huggingface \
     XDG_CACHE_HOME=/data/cache \
+    TIKTOKEN_CACHE_DIR=/opt/tiktoken \
     OMP_NUM_THREADS=6 \
     OPENBLAS_NUM_THREADS=6 \
     EL_VOICE_MODELS=/models
@@ -39,5 +44,5 @@ WORKDIR /workspace
 RUN python /opt/el-voice/check_environment.py --skip-models
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
+    CMD ["python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)).get('ready')"]
 CMD ["python", "app.py", "--host", "0.0.0.0", "--port", "8000"]

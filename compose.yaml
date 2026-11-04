@@ -67,5 +67,6 @@ services:
 networks:
   private:
     internal: true
-  ingress: {}
+  ingress:
+    internal: true
   downloads: {}

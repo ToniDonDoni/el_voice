@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from llm_client import LLMServiceClient
+
 MODEL_ROOT = Path(os.environ.get("EL_VOICE_MODELS", "/models")).resolve()
 MODEL_TOOL = Path("/opt/el-voice/download_models.py")
 WORKSPACE = Path(__file__).resolve().parent
@@ -49,10 +51,6 @@ def _validate_settings(settings: dict[str, Any]) -> None:
         raise ValueError("tts.sample_rate must be 24000 for the browser audio protocol")
     integer("tts", "cpu_threads", 1, 64)
     integer("stt", "cpu_threads", 1, 64)
-    integer("llm", "cpu_threads", 1, 64)
-    integer("llm", "context_tokens", 512, 32768)
-    integer("llm", "batch_tokens", 1, 4096)
-    integer("llm", "max_response_tokens", 1, 4096)
     vad = settings.get("vad")
     if not isinstance(vad, dict):
         raise ValueError("vad must be an object")
@@ -93,12 +91,12 @@ def _load_manifest() -> dict[str, Any]:
     return json.loads(Path("/opt/el-voice/models.json").read_text(encoding="utf-8"))
 
 
-def verify_models() -> None:
+def verify_models(paths: tuple[str, ...] = ("stt/small", "tts/v4_cyrillic.pt")) -> None:
     """Verify publisher assets and local receipts without loading model code."""
     if not MODEL_TOOL.is_file():
         raise RuntimeError("The model verification tool is unavailable")
     result = subprocess.run(
-        [sys.executable, str(MODEL_TOOL), "--verify"],
+        [sys.executable, str(MODEL_TOOL), "--verify", "--only", *paths],
         check=False,
         capture_output=True,
         text=True,
@@ -207,20 +205,6 @@ class StreamingSileroVAD:
         return None, None, score
 
 
-class CancelOnToken:
-    """Make llama.cpp emit EOS as soon as cancellation is observed."""
-
-    def __init__(self, cancel_event: threading.Event, eos_token: int):
-        self.cancel_event = cancel_event
-        self.eos_token = eos_token
-
-    def __call__(self, _input_ids: np.ndarray, scores: np.ndarray) -> np.ndarray:
-        if self.cancel_event.is_set():
-            scores.fill(-np.inf)
-            scores[self.eos_token] = 0.0
-        return scores
-
-
 @dataclass
 class Turn:
     turn_id: str
@@ -243,14 +227,14 @@ class VoiceRuntime:
         self.status: dict[str, Any] = {
             "stage": "error" if self.config_error else "loading",
             "ready": False,
-            "models": {"vad": "loading", "stt": "loading", "llm": "loading", "tts": "loading"},
+            "models": {"vad": "loading", "stt": "loading", "llm": "connecting", "tts": "loading"},
             "error": type(self.config_error).__name__ if self.config_error else None,
         }
+        self.mode = os.getenv("EL_VOICE_MODE", "local").lower()
+        self.llm_client = LLMServiceClient()
         self.whisper = None
-        self.llm = None
         self.tts = None
         self.torch = None
-        self.llm_lock = threading.Lock()
         self.tts_lock = threading.Lock()
         self.stt_lock = threading.Lock()
         self.metrics: deque[dict[str, float]] = deque(maxlen=100)
@@ -262,15 +246,19 @@ class VoiceRuntime:
                 raise ValueError(f"Could not load settings: {self.config_error}") from self.config_error
             _validate_settings(self.config)
             await asyncio.to_thread(self._load_models)
+            llm_status = await self.llm_client.wait_ready()
+            self.status["models"]["llm"] = "ready"
+            self.status["llm"] = llm_status
             self.status.update(stage="ready", ready=True, error=None)
         except Exception as exc:
-            self.status.update(stage="error", ready=False, error=type(exc).__name__)
+            self.status.update(stage="error", ready=False,
+                               error=getattr(exc, "code", type(exc).__name__))
             logging.getLogger("el_voice").exception(
                 "Local model initialization failed (%s): %s", type(exc).__name__, str(exc)[:500]
             )
 
     def _load_models(self) -> None:
-        verify_models()
+        verify_models((self.config["stt"]["model"], self.config["tts"]["model"]))
         # Keep the import order used by the environment check to avoid native OpenBLAS conflicts.
         import torch
 
@@ -296,18 +284,6 @@ class VoiceRuntime:
             local_files_only=True,
         )
         self.status["models"]["stt"] = "ready"
-
-        self.status["models"]["llm"] = "loading"
-        from llama_cpp import Llama
-
-        self.llm = Llama(
-            model_path=str(MODEL_ROOT / self.config["llm"]["model"]),
-            n_ctx=int(self.config.get("llm", {}).get("context_tokens", 3072)),
-            n_threads=int(self.config.get("llm", {}).get("cpu_threads", 4)),
-            n_batch=int(self.config["llm"].get("batch_tokens", 256)),
-            verbose=False,
-        )
-        self.status["models"]["llm"] = "ready"
 
         self.status["models"]["tts"] = "loading"
         tts_path = MODEL_ROOT / tts_config["model"]
@@ -353,51 +329,21 @@ class VoiceRuntime:
                     self.stt_lock.release()
         return ""
 
-    def llm_stream(
+    async def llm_stream(
         self,
         user_text: str,
         cancel_event: threading.Event,
         history: list[dict[str, str]],
-    ):
-        if self.llm is None:
-            raise RuntimeError("LLM is not ready")
-        system_prompt = (
-            "You are a concise Russian-speaking Dota 2 companion. Answer in Russian unless "
-            "the user asks otherwise. Focus on Dota 2 strategy, heroes, items, and game concepts. "
-            "Do not claim live match data or current patch facts you cannot verify. Keep replies "
-            "natural and short enough to speak aloud; avoid markdown and lists unless useful."
-        )
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history[-8:])
-        messages.append({"role": "user", "content": user_text})
-        processor = CancelOnToken(cancel_event, self.llm.token_eos())
-        while not cancel_event.is_set():
-            if self.llm_lock.acquire(timeout=0.05):
-                break
-        else:
-            return
-        try:
-            stream = self.llm.create_chat_completion(
-                messages=messages,
-                stream=True,
-                temperature=0.55,
-                top_p=0.9,
-                max_tokens=int(self.config["llm"].get("max_response_tokens", 192)),
-                logits_processor=[processor],
-            )
-            try:
-                for item in stream:
-                    if cancel_event.is_set():
-                        break
-                    content = item.get("choices", [{}])[0].get("delta", {}).get("content")
-                    if content:
-                        yield content
-            finally:
-                close = getattr(stream, "close", None)
-                if close:
-                    close()
-        finally:
-            self.llm_lock.release()
+        session_id: str = "",
+        turn_id: str = "",
+    ) -> Any:
+        async for event in self.llm_client.stream(
+            session_id, turn_id, user_text, cancel_event
+        ):
+            yield event
+
+    async def clear_llm_session(self, session_id: str) -> None:
+        await self.llm_client.clear_session(session_id)
 
     def synthesize(
         self, text: str, cancel_event: threading.Event | None = None
@@ -441,9 +387,12 @@ class VoiceRuntime:
 
         return {
             **self.status,
+            "mode": self.mode,
+            "remote_text_disclosure": self.mode == "remote",
             "system": "Linux",
             "architecture": "aarch64",
-            "model_file_count": len(_load_manifest()["assets"]) if self.status["ready"] else None,
+            "model_file_count": sum(1 for item in _load_manifest()["assets"]
+                                     if item["path"].startswith(("stt/", "tts/"))) if self.status["ready"] else None,
             "vad": {"type": "Silero ONNX bundled with faster-whisper", **self.vad_config},
             "audio": self.config.get("audio", {"max_buffered_audio_ms": 2000}),
             "metrics": {

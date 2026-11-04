@@ -1,35 +1,35 @@
 # SPEC-003: LLM-Driven Tool Calling
 
 ## 1. Problem and Current State
-- Regex decides whether web search is needed.
-- Search and final response use separate LLM workflows.
-- Search results are injected into `SystemMessage`.
+- `needs_search()` uses regex to decide whether searching is allowed.
+- A search-only `create_agent().ainvoke()` runs before a separate final `model.astream()` call.
+- Search results are inserted into `SystemMessage`.
 
 ## 2. Required State
-- LLM autonomously decides when to call `web_search`.
-- One LangChain agent manages the entire conversation turn.
-- LLM can call tools repeatedly or answer directly.
-- Tool results are passed through `ToolMessage`, never `SystemMessage`.
-- Every model request, tool call/result, reasoning telemetry, and final answer within a turn shares its existing `turn_id` (also used as `trace_id`) for correlation.
+- In Remote Voice, one LangChain agent execution owns the entire turn: decide, search if needed, and answer.
+- The LLM may answer without tools or invoke `web_search` one or multiple times, including follow-up searches.
+- Search data stays in paired `ToolMessage` results, never in `SystemMessage`.
+- Stream only final user-facing answer text to TTS; never speak reasoning, tool arguments, or intermediate agent messages.
+- All model requests, reasoning metrics, tool calls/results/errors, source events, and answer chunks of one turn share the existing `turn_id` as `trace_id`. Retain `session_id`, per-request index, and individual `tool_call_id` / `tool_invocation_id` values.
+- Preserve existing context, source UI, cancellation, bounded execution, provider session headers, and Local Voice behavior.
 
 ## 3. Acceptance Criteria
-- [ ] No regex-based search routing.
-- [ ] One `create_agent` workflow per turn.
-- [ ] Zero, one, or multiple tool calls supported.
-- [ ] Final answers stream to TTS.
-- [ ] Search results remain untrusted tool data.
-- [ ] All model/tool/stream/error events for a turn carry the same `turn_id`/`trace_id`; individual tool calls retain distinct `tool_call_id` values.
-- [ ] Cancellation, history, source events and iteration limits work.
+- [ ] No regex gate or hardcoded search router; the model decides when to search.
+- [ ] One agent execution per turn handles zero, one, or multiple tool calls; no separate final-answer workflow.
+- [ ] LangChain pairs tool calls with `ToolMessage` results; untrusted search text never becomes a system instruction.
+- [ ] Final-answer tokens reach TTS incrementally; reasoning, tool data, and intermediate messages never do.
+- [ ] Every model/tool/stream/error event is correlated by the same `turn_id`/`trace_id`; distinct requests and tools keep distinct IDs, and turns never mix.
+- [ ] Cancellation, search timeouts, failure codes, history, source links, and iteration limits remain functional.
+- [ ] Tests cover no-search, single-search, repeated-search, streaming, tracing, errors, and interruption.
 
 ## 4. Analysis
-Existing LangChain `create_agent` supports autonomous tool calling. No custom agent loop is necessary. Codex already correlates requests by `turn_id`/`trace_id`; preserve this across the full agent loop without logging reasoning content.
+LangChain `create_agent` already supports repeated tool calls and streaming. Multiple LLM requests inside one agent execution are expected; the separate search-agent and final-answer workflows are not needed. Keep reasoning telemetry, not reasoning content, in logs.
 
 ## 5. Proposed Solution
-Reuse Codex infrastructure and `create_agent`. Remove `needs_search()` and the separate final LLM call. Let the agent manage tool execution and return the final response. Propagate the turn ID across each agent step and keep per-tool call IDs.
+Reuse Codex's model, search tool, transport, and observability. Replace `needs_search()`, `_search_context()`, and the standalone final `model.astream()` with one streaming `create_agent` execution. Extract sources from tool results, forward only final answer deltas, and propagate turn correlation throughout the agent run.
 
 ## 6. ToDo
-- [ ] Refactor remote provider.
-- [ ] Preserve streaming and cancellation.
-- [ ] Preserve turn-wide correlation for model calls, reasoning metrics, tools and errors.
-- [ ] Add tests for direct answers, repeated searches, trace IDs and failures.
-- [ ] Run regression and integration tests.
+- [ ] Refactor the remote provider into one agent-driven stream.
+- [ ] Preserve safe answer streaming, source events, cancellation, and limits.
+- [ ] Propagate `trace_id` to every provider request, tool event, and reasoning metric.
+- [ ] Add deterministic contract tests and run regression/integration checks.

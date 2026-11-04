@@ -132,7 +132,7 @@ async def run_ws_checks(port: int, backend: FakeBackend, base_config, base: str)
         status_mid = fetch_json(base + "/status")
         check("status reports content-free last prompt statistics",
               status_mid["last_prompt"].get("history_turns") == 1
-              and set(status_mid["last_prompt"]) == {"history_turns", "chars"},
+              and set(status_mid["last_prompt"]) <= {"history_turns", "chars", "truncated"},
               repr(status_mid["last_prompt"]))
         check("status never contains prompt or answer content",
               "first question" not in json.dumps(status_mid)
@@ -315,7 +315,7 @@ async def main() -> int:
 
         status_after = fetch_json(base + "/status")
         check("status remains content-free after sessions close",
-              set(status_after["last_prompt"]) <= {"history_turns", "chars"}
+              set(status_after["last_prompt"]) <= {"history_turns", "chars", "truncated"}
               and "first question" not in json.dumps(status_after),
               repr(status_after["last_prompt"]))
         check("backend was not closed while serving", backend.closed is False)

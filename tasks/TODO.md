@@ -1,4 +1,4 @@
-- [ ] [Implement local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
+- [ ] [Implement local Elden Ring voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
   - [x] Implementation in `workspace/` (streaming VAD, Whisper, Gemma streaming through the
     internal LLM service, Silero `b_lez`, barge-in, reconnects).
   - [x] Development-sandbox end-to-end self-test passes (24 checks with both services).

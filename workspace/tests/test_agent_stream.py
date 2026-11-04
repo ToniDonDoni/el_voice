@@ -141,8 +141,8 @@ class AgentStreamContractTests(unittest.IsolatedAsyncioTestCase):
             async def astream(self, _state, **_kwargs):
                 yield updated("model", model("", [commit_call()]))
                 yield updated("tools", commit_result())
-                yield text_delta("Early")
                 started.set()
+                yield text_delta("Early")
                 await allow_finish.wait()
                 yield text_delta(" answer")
                 yield updated("model", model("Early answer"))

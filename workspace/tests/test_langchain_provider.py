@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 try:
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
@@ -46,6 +46,9 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
             AIMessage(content="", tool_calls=[{
                 "id": "call-search", "name": "web_search", "args": {"query": "current Axe counter guide"}
             }]),
+            AIMessage(content="", tool_calls=[{
+                "id": "call-finish", "name": "begin_final_answer", "args": {}
+            }]),
             AIMessage(content="The guide recommends a Silver Edge for Axe."),
         ])
         provider = object.__new__(OpenCodeLangChainProvider)
@@ -76,7 +79,19 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         class FakeGraph:
             async def astream(self, _state, **_kwargs):
                 try:
-                    yield ("updates", {"model": {"messages": [AIMessage(content="Hello")]}})
+                    yield ("updates", {"model": {"messages": [
+                        AIMessage(content="", tool_calls=[{
+                            "id": "call-finish", "name": "begin_final_answer", "args": {}
+                        }])
+                    ]}})
+                    yield ("updates", {"tools": {"messages": [
+                        ToolMessage(content="Ready", tool_call_id="call-finish",
+                                    name="begin_final_answer")
+                    ]}})
+                    yield ("messages", (
+                        AIMessageChunk(content="Hello"),
+                        {"langgraph_node": "model"},
+                    ))
                     await asyncio.Event().wait()
                 finally:
                     closed.append(True)

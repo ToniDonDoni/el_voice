@@ -267,7 +267,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         try:
                             kind, event = await asyncio.wait_for(queue.get(), timeout=0.1)
                         except asyncio.TimeoutError:
-                            if producer_finished.is_set():
+                            # The producer may finish while buffered events remain.
+                            # Never discard a terminal "done" queued during a burst.
+                            if producer_finished.is_set() and queue.empty():
                                 break
                             continue
                         event.setdefault("timestamp", utc_timestamp())

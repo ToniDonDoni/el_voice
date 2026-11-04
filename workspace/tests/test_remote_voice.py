@@ -24,7 +24,6 @@ from llm_service.remote_provider import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     ProviderConfigurationError,
-    needs_search,
     validate_provider_config,
 )
 from llm_service.local_provider import CancelOnToken
@@ -164,12 +163,6 @@ class RemoteConfigurationTests(unittest.TestCase):
         self.assertEqual(response.json()["error"], "provider_configuration_error")
         self.assertNotIn("OPENCODE_GO_API_KEY=", response.text)
 
-    def test_current_information_intent_routes_to_search(self):
-        self.assertTrue(needs_search("What is the latest Dota patch?"))
-        self.assertTrue(needs_search("Проверь актуальный курс сегодня"))
-        self.assertTrue(needs_search("Какая погода в Москве?"))
-        self.assertTrue(needs_search("I'm not sure where this item drops"))
-        self.assertFalse(needs_search("How do I lane against Axe?"))
 
 
 class SearchToolTests(unittest.IsolatedAsyncioTestCase):

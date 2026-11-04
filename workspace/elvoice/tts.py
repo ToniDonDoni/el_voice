@@ -36,10 +36,13 @@ def _speakable(text: str) -> bool:
 class SpeakableChunker:
     """Accumulates streamed text and emits short speakable phrases."""
 
-    def __init__(self, min_chars: int, soft_chars: int, max_chars: int):
+    def __init__(self, min_chars: int, soft_chars: int, max_chars: int,
+                 first_chunk_chars: int | None = None):
         self._min = int(min_chars)
         self._soft = int(soft_chars)
         self._max = int(max_chars)
+        self._first_max = int(first_chunk_chars or max_chars)
+        self._emitted = False
         self._buffer = ""
 
     def feed(self, delta: str) -> list[str]:
@@ -57,9 +60,20 @@ class SpeakableChunker:
                 break
             sentence_end = self._sentence_end(buffer)
             if sentence_end is not None and sentence_end + 1 >= self._min:
-                self._buffer = buffer[sentence_end + 1:]
-                self._push(chunks, buffer[: sentence_end + 1])
+                if self._emitted or sentence_end + 1 <= self._first_max:
+                    self._buffer = buffer[sentence_end + 1:]
+                    self._push(chunks, buffer[: sentence_end + 1])
+                    continue
+                cut = self._cut(buffer, self._first_max)
+                self._buffer = buffer[cut:]
+                self._push(chunks, buffer[:cut])
                 continue
+            if not self._emitted and len(buffer) >= self._first_max:
+                cut = self._first_cut(buffer)
+                if cut:
+                    self._buffer = buffer[cut:]
+                    self._push(chunks, buffer[:cut])
+                    continue
             if len(buffer) >= self._max:
                 cut = self._cut(buffer, self._max)
                 self._buffer = buffer[cut:]
@@ -82,6 +96,7 @@ class SpeakableChunker:
         self._buffer = self._buffer.lstrip()
         if text and _speakable(text):
             chunks.append(text)
+            self._emitted = True
 
     @staticmethod
     def _sentence_end(buffer: str) -> int | None:
@@ -98,6 +113,16 @@ class SpeakableChunker:
         if space <= 0:
             return limit
         return space
+
+    def _first_cut(self, buffer: str) -> int:
+        limit = min(self._first_max, len(buffer))
+        clause = -1
+        for index in range(limit - 1):
+            if buffer[index] in _CLAUSE_END and buffer[index + 1].isspace():
+                clause = index + 1
+        if clause > 0:
+            return clause
+        return self._cut(buffer, limit)
 
     def _clause_cut(self, buffer: str) -> int:
         start = self._soft // 2

@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import threading
+import time
 from pathlib import Path
 
 from . import models
+
+logger = logging.getLogger("elvoice.engines")
 
 COMPONENTS = ("vad", "stt", "llm", "tts")
 
@@ -36,6 +40,7 @@ class EngineManager:
             name: {"status": "pending", "detail": ""} for name in COMPONENTS
         }
         self._init_error: str | None = None
+        self._initialized = False
         self._ready: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -59,8 +64,10 @@ class EngineManager:
 
     @property
     def is_ready(self) -> bool:
-        return self._init_error is None and all(
-            component["status"] == "ready" for component in self._components.values()
+        return (
+            self._initialized
+            and self._init_error is None
+            and all(component["status"] == "ready" for component in self._components.values())
         )
 
     @property
@@ -81,6 +88,7 @@ class EngineManager:
         self._components[name] = {"status": status, "detail": detail}
 
     def _initialize(self) -> None:
+        logger.info("engine initialization started")
         try:
             self._load_all()
         except Exception as exc:  # noqa: BLE001 - readiness must report the failure
@@ -89,6 +97,10 @@ class EngineManager:
                 if component["status"] != "ready":
                     self._mark(name, "error", self._init_error)
         finally:
+            if self._init_error:
+                logger.error("engine initialization failed: %s", self._init_error)
+            else:
+                logger.info("engine initialization complete: all components ready")
             try:
                 if self._loop is not None and self._ready is not None:
                     self._loop.call_soon_threadsafe(self._ready.set)
@@ -129,10 +141,13 @@ class EngineManager:
         self._tts_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="elvoice-tts"
         )
+        self._warm_up()
+        self._initialized = True
 
     def _load_vad(self) -> None:
         from .vad import SileroVad
 
+        started = time.perf_counter()
         path = models.verify_asset(self._root, self._cfg["vad"]["model"])
         self._vad = SileroVad(
             str(path),
@@ -140,9 +155,11 @@ class EngineManager:
             threads=1,
         )
         self._mark("vad", "ready")
+        logger.info("model vad ready in %.1f s", time.perf_counter() - started)
 
     def _load_tts(self) -> None:
         torch = self._torch
+        started = time.perf_counter()
         path = models.verify_asset(self._root, self._cfg["tts"]["model"])
         package = torch.package.PackageImporter(str(path)).load_pickle("tts_models", "model")
         package.to(torch.device("cpu"))
@@ -151,10 +168,12 @@ class EngineManager:
             raise EngineError(f"configured Silero speaker is absent from the model: {speaker}")
         self._tts_model = package
         self._mark("tts", "ready")
+        logger.info("model tts ready in %.1f s", time.perf_counter() - started)
 
     def _load_stt(self) -> None:
         from faster_whisper import WhisperModel
 
+        started = time.perf_counter()
         models.verify_whisper_files(self._root)
         stt_cfg = self._cfg["stt"]
         self._stt = WhisperModel(
@@ -164,11 +183,13 @@ class EngineManager:
             cpu_threads=int(stt_cfg["cpu_threads"]),
         )
         self._mark("stt", "ready")
+        logger.info("model stt ready in %.1f s", time.perf_counter() - started)
 
     def _load_llm(self) -> None:
         from llama_cpp import Llama
 
         llm_cfg = self._cfg["llm"]
+        started = time.perf_counter()
         path = models.verify_asset(self._root, llm_cfg["model"])
         self._llm = Llama(
             model_path=str(path),
@@ -178,6 +199,33 @@ class EngineManager:
             verbose=False,
         )
         self._mark("llm", "ready")
+        logger.info("model llm ready in %.1f s", time.perf_counter() - started)
+
+    def _warm_up(self) -> None:
+        """Run each engine once so lazy init is not paid on the first real turn."""
+        started = time.perf_counter()
+        try:
+            # Long enough to warm the TTS path for a full first phrase.
+            self._synthesize_sync("Привет! Это голосовой помощник по Dota 2.")
+            self._stt.transcribe(
+                self._np.zeros(8000, dtype=self._np.float32),
+                language=self._cfg["stt"]["language"],
+                beam_size=1,
+                vad_filter=False,
+                without_timestamps=True,
+            )
+            # Same system prompt as a real turn to warm prompt evaluation.
+            self._llm.create_chat_completion(
+                messages=[
+                    {"role": "system", "content": self._cfg["llm"]["system_prompt"]},
+                    {"role": "user", "content": "Привет"},
+                ],
+                max_tokens=1,
+                temperature=0.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - warm-up must not block readiness
+            logger.warning("engine warm-up skipped: %s", type(exc).__name__)
+        logger.info("engine warm-up finished in %.1f s", time.perf_counter() - started)
 
     # -- inference ---------------------------------------------------------
     async def transcribe(self, pcm: bytes) -> str:
@@ -190,15 +238,21 @@ class EngineManager:
     def _transcribe_sync(self, pcm: bytes) -> str:
         np = self._np
         cfg = self._cfg["stt"]
+        started = time.perf_counter()
         audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
         segments, _info = self._stt.transcribe(
             audio,
             language=cfg["language"],
             beam_size=int(cfg["beam_size"]),
             vad_filter=False,
+            without_timestamps=True,
             condition_on_previous_text=False,
         )
         text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
+        logger.info(
+            "stt: %.0f ms inference for %.2f s audio",
+            (time.perf_counter() - started) * 1000.0, len(audio) / 16000.0,
+        )
         return " ".join(text.split())
 
     async def synthesize(self, text: str) -> bytes:
@@ -211,6 +265,7 @@ class EngineManager:
     def _synthesize_sync(self, text: str) -> bytes:
         torch = self._torch
         np = self._np
+        started = time.perf_counter()
         tts_cfg = self._cfg["tts"]
         with torch.inference_mode():
             audio = self._tts_model.apply_tts(
@@ -219,6 +274,10 @@ class EngineManager:
                 sample_rate=int(tts_cfg["sample_rate"]),
             )
         array = audio.detach().to(dtype=torch.float32).clamp(-1.0, 1.0).numpy()
+        logger.info(
+            "tts: %.0f ms synthesis for %.2f s audio",
+            (time.perf_counter() - started) * 1000.0, len(array) / 24000.0,
+        )
         return (array * 32767.0).astype(np.int16).tobytes()
 
     async def stream_chat(self, messages: list[dict], cancel: threading.Event):
@@ -255,6 +314,7 @@ class EngineManager:
                         top_p=float(llm_cfg["top_p"]),
                         repeat_penalty=float(llm_cfg["repeat_penalty"]),
                     )
+                    first_token = True
                     try:
                         for chunk in generation:
                             if cancel.is_set():
@@ -263,6 +323,9 @@ class EngineManager:
                             delta = choice.get("delta") or {}
                             text = delta.get("content") or ""
                             if text:
+                                if first_token:
+                                    first_token = False
+                                    logger.info("llm: first token delivered")
                                 _deliver(("token", text))
                     finally:
                         close = getattr(generation, "close", None)

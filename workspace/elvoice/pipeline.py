@@ -118,11 +118,13 @@ class VoiceSession:
 
     # -- session lifecycle -------------------------------------------------
     async def start(self) -> dict:
+        logger.info("session %s: start requested", self.session_id)
         await self._engines.wait_ready()
         self._engines.vad.reset_states()
         self._segmenter.reset()
         self._pending.clear()
         self._state = "listening"
+        logger.info("session %s: ready", self.session_id)
         vad_cfg = self._cfg["vad"]
         return {
             "type": "ready",
@@ -141,6 +143,7 @@ class VoiceSession:
         }
 
     async def stop(self) -> None:
+        logger.info("session %s: stop requested", self.session_id)
         self._closed = True
         turn = self._turn
         if turn is not None:
@@ -184,6 +187,8 @@ class VoiceSession:
 
     async def _on_onset(self, turn_id: int) -> None:
         onset_ts = time.perf_counter()
+        previous = self._turn.state if self._turn is not None else "none"
+        logger.info("turn=%s: onset (previous=%s)", turn_id, previous)
         if self._turn is not None and not self._turn.cancelled:
             await self._cancel(self._turn, "barge_in", onset_ts)
         self._turn = Turn(turn_id)
@@ -195,6 +200,10 @@ class VoiceSession:
         turn = self._turn
         if turn is None or turn.id != event["turn_id"] or turn.cancelled:
             return
+        logger.info(
+            "turn=%s: utterance end speech_ms=%.0f audio_ms=%.0f",
+            turn.id, float(event["speech_ms"]), len(event["pcm"]) / 32.0,
+        )
         if float(event["speech_ms"]) < float(self._cfg["vad"]["min_speech_ms"]):
             self._turn = None
             self._metrics.count("empty_turns")
@@ -209,8 +218,10 @@ class VoiceSession:
     # -- turn processing ---------------------------------------------------
     async def _run_turn(self, turn: Turn, pcm: bytes) -> None:
         try:
+            logger.info("turn=%s: stt queued", turn.id)
             text = await self._engines.transcribe(pcm)
             turn.stt_done_ts = time.perf_counter()
+            logger.info("turn=%s: stt done chars=%d", turn.id, len(text))
             if turn.cancelled:
                 return
             await self._send_json({"type": "user_text", "turn_id": turn.id, "text": text})
@@ -224,7 +235,7 @@ class VoiceSession:
             raise
         except Exception as exc:  # noqa: BLE001 - report to the browser, keep the session
             turn.cancel.set()
-            logger.warning("turn %s failed: %s", turn.id, repr(exc)[:400])
+            logger.exception("turn=%s: failed (%s)", turn.id, type(exc).__name__)
             if not turn.cancelled:
                 await self._send_json({
                     "type": "error",
@@ -235,6 +246,7 @@ class VoiceSession:
                 await self._finish_turn(turn)
 
     async def _generate(self, turn: Turn, text: str) -> None:
+        logger.info("turn=%s: llm start prompt_chars=%d", turn.id, len(text))
         llm_cfg = self._cfg["llm"]
         tts_cfg = self._cfg["tts"]
         messages = [
@@ -245,6 +257,7 @@ class VoiceSession:
             int(tts_cfg["min_chunk_chars"]),
             int(tts_cfg["soft_chunk_chars"]),
             int(tts_cfg["max_chunk_chars"]),
+            int(tts_cfg.get("first_chunk_chars", 50)),
         )
         sequence = 0
         iterator = self._engines.stream_chat(messages, turn.cancel)
@@ -258,6 +271,10 @@ class VoiceSession:
                     return
                 if turn.first_token_ts is None:
                     turn.first_token_ts = time.perf_counter()
+                    logger.info(
+                        "turn=%s: first token after %.0f ms",
+                        turn.id, (turn.first_token_ts - turn.stt_done_ts) * 1000.0,
+                    )
                 await self._send_json({"type": "assistant_text", "turn_id": turn.id, "delta": delta})
                 for chunk in chunker.feed(delta):
                     if turn.cancelled:
@@ -279,6 +296,10 @@ class VoiceSession:
             return
         await self._send_json({"type": "turn_end", "turn_id": turn.id})
         if turn.first_audio_ts is not None and turn.speech_end_ts is not None:
+            logger.info(
+                "turn=%s: first audio dispatched after %.0f ms",
+                turn.id, (turn.first_audio_ts - turn.speech_end_ts) * 1000.0,
+            )
             response_ms = (turn.first_audio_ts - turn.speech_end_ts) * 1000.0
             self._metrics.response(response_ms)
             await self._send_json({
@@ -304,12 +325,17 @@ class VoiceSession:
         if turn.first_audio_ts is None:
             turn.first_audio_ts = time.perf_counter()
             turn.state = "speaking"
+            logger.info("turn=%s: first tts chunk dispatched (%d bytes)", turn.id, len(pcm))
             await self._set_state("speaking")
         return sequence
 
     async def _cancel(self, turn: Turn, reason: str, onset_ts: float | None = None) -> None:
         if turn.cancelled:
             return
+        logger.info(
+            "turn=%s: cancel reason=%s state=%s audio_sent=%s",
+            turn.id, reason, turn.state, turn.audio_sent,
+        )
         turn.cancelled = True
         turn.state = "cancelled"
         turn.cancel.set()
@@ -329,12 +355,14 @@ class VoiceSession:
         if self._turn is not turn or turn.cancelled:
             return
         turn.state = "done"
+        logger.info("turn=%s: completed", turn.id)
         self._metrics.count("turns_completed")
         self._turn = None
         await self._set_state("listening")
 
     # -- client notifications ---------------------------------------------
     async def playback_done(self, turn_id: int) -> None:
+        logger.info("turn=%s: playback done from browser", turn_id)
         turn = self._turn
         if turn is None or turn.id != turn_id or turn.cancelled:
             return
@@ -342,6 +370,7 @@ class VoiceSession:
             await self._finish_turn(turn)
 
     def client_playback_stopped(self, turn_id: int, milliseconds: float) -> None:
+        logger.info("turn=%s: browser stopped playback in %.1f ms", turn_id, float(milliseconds))
         if 0.0 <= float(milliseconds) <= 10000.0:
             self._metrics.client_stop(float(milliseconds))
 

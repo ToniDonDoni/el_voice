@@ -170,6 +170,7 @@ async def tts_test_audio() -> Response:
 @app.websocket("/ws")
 async def websocket_session(websocket: WebSocket) -> None:
     await websocket.accept()
+    logger.info("ws: client connected")
     send_lock = asyncio.Lock()
     session: VoiceSession | None = None
 
@@ -208,6 +209,7 @@ async def websocket_session(websocket: WebSocket) -> None:
                 continue
             kind = payload.get("type")
             if kind == "start":
+                logger.info("ws: start requested")
                 if STATE.cfg is None or STATE.manager is None:
                     await send_json({
                         "type": "error", "code": "config_error",
@@ -216,6 +218,7 @@ async def websocket_session(websocket: WebSocket) -> None:
                     continue
                 previous = STATE.active
                 if previous is not None and previous["socket"] is not websocket:
+                    logger.info("ws: replacing stale or busy session")
                     if previous["socket"].client_state == WebSocketState.DISCONNECTED:
                         try:
                             await previous["session"].stop()
@@ -251,8 +254,10 @@ async def websocket_session(websocket: WebSocket) -> None:
                     })
                     continue
                 STATE.active = {"session": session, "socket": websocket}
+                logger.info("ws: session %s active", session.session_id)
                 await send_json(ready)
             elif kind == "stop":
+                logger.info("ws: stop requested")
                 stopped = session
                 if stopped is not None:
                     await stopped.stop()
@@ -270,6 +275,7 @@ async def websocket_session(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        logger.info("ws: client disconnected")
         if session is not None:
             try:
                 await session.stop()

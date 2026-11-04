@@ -92,7 +92,7 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
             if payload.get("tools"):
                 has_search_result = any(
                     message.get("role") == "tool"
-                    and message.get("name") == "web_search"
+                    and message.get("tool_call_id") == "call-search"
                     for message in history
                 )
                 if has_search_prompt and not has_search_result:

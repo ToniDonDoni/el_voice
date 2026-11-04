@@ -3,7 +3,7 @@
 SDDTDD SPEC: tasks/SPEC-002-REMOTE-VOICE-LLM-SERVICE.md
 Every request made by the Remote LLM during a routed turn must carry a stable
 OpenCode session id and the EL Voice client user-agent. This includes regular
-generation, search planning, the agent continuation, and the final answer.
+generation and agent tool continuations in a single execution.
 """
 
 from __future__ import annotations
@@ -83,8 +83,14 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
             captured.append(request)
             payload = json.loads(request.content)
             captured_payloads.append(payload)
-            if payload.get("tools"):
-                has_tool_result = any(message.get("role") == "tool" for message in payload["messages"])
+            history = payload.get("messages", [])
+            has_search_prompt = any(
+                message.get("role") == "user"
+                and "latest Dota patch" in str(message.get("content", ""))
+                for message in history
+            )
+            if payload.get("tools") and has_search_prompt:
+                has_tool_result = any(message.get("role") == "tool" for message in history)
                 if not has_tool_result:
                     return sse({"tool_calls": [{
                         "index": 0,
@@ -98,7 +104,7 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         class Search:
             async def tool_payload(self, query: str) -> str:
                 return json.dumps({"query": query, "results": [{
-                    "title": "Dota patch notes", "url": "https://example.test/patch",
+                    "title": "Dota patch notes", "url": "https://example.com/patch",
                     "snippet": "Patch summary",
                 }]})
 
@@ -132,8 +138,8 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         self.assertEqual(second[-1]["type"], "done")
         self.assertEqual(third[-1]["type"], "done")
         self.assertEqual([event["type"] for event in searched], ["tool_call", "sources", "delta", "done"])
-        self.assertEqual(len(captured), 6, "regular and search turns must reach the HTTP provider")
-        expected = [session_a, session_a, session_b, session_c, session_c, session_c]
+        self.assertEqual(len(captured), 5, "one agent execution may make multiple provider requests")
+        expected = [session_a, session_a, session_b, session_c, session_c]
         actual = [request.headers.get("x-opencode-session", "") for request in captured]
         self.assertEqual(actual, ["ses_" + session_id for session_id in expected])
         self.assertTrue(all(request.headers.get("user-agent") == "EL-Voice/0.1" for request in captured))
@@ -145,18 +151,20 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
                         [sorted(payload) for payload in captured_payloads])
         log_events = [json.loads(record.getMessage()) for record in provider_log.records]
         responses = [event for event in log_events if event["event"] == "remote_provider_http_response"]
-        self.assertEqual(len(responses), 6)
+        self.assertEqual(len(responses), 5)
         self.assertTrue(all(event["provider_host"] == "opencode.ai" for event in responses))
         self.assertTrue(all(event["model"] == "deepseek-v4.1-flash" for event in responses))
         self.assertTrue(all(event["status_code"] == 200 for event in responses))
         self.assertTrue(all(event["session_header_present"] for event in responses))
-        search_events = [event for event in log_events if event["event"] == "remote_web_search_completed"]
-        self.assertEqual(len(search_events), 1)
-        self.assertEqual(search_events[0]["backend"], "configured")
-        self.assertEqual(search_events[0]["result_count"], 1)
-        self.assertEqual(search_events[0]["trace_id"], "4" * 32)
-        self.assertEqual(search_events[0]["turn_id"], "4" * 32)
-        self.assertIn("timestamp", search_events[0])
+        tool_events = [event for event in log_events if event["event"] == "agent_tool_result"]
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0]["tool_call_id"], "call-search")
+        self.assertEqual(tool_events[0]["result_count"], 1)
+        self.assertEqual(tool_events[0]["trace_id"], "4" * 32)
+        self.assertEqual(tool_events[0]["turn_id"], "4" * 32)
+        self.assertIn("timestamp", tool_events[0])
+        per_turn = [event for event in responses if event["turn_id"] == "4" * 32]
+        self.assertEqual([event["request_index"] for event in per_turn], [1, 2])
         self.assertNotIn("test-key", " ".join(record.getMessage() for record in provider_log.records))
         self.assertNotIn("Find the latest Dota patch notes", " ".join(
             record.getMessage() for record in provider_log.records

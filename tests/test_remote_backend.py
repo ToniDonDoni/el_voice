@@ -245,17 +245,14 @@ async def search_failure_scenario(config) -> None:
 
     backend = RemoteBackend(config, chat_model=model, search=failing_search)
     await backend.start()
-    try:
-        await collect(backend, [{"role": "user", "content": "search"}])
-    except BackendError as exc:
-        check("search failure is reported as an actionable error",
-              exc.code == "search_unavailable" and "No answer was fabricated" in exc.message,
-              f"{exc.code}: {exc.message}")
-        check("search failure does not leak a credential",
-              "sk-live-secret" not in exc.message, exc.message)
-    else:
-        check("search failure is reported as an actionable error", False,
-              "no BackendError raised")
+    events = await collect(backend, [{"role": "user", "content": "search"}])
+    spoken = joined_deltas(events)
+    check("search failure/timeout with no answer speaks the fallback line",
+          spoken == "Я так качался.", repr(spoken))
+    check("search failure does not leak a credential",
+          "sk-live-secret" not in json.dumps(events), "no credential in events")
+    check("search failure does not fabricate an answer",
+          "sk-live-secret" not in spoken and "throttled" not in spoken, spoken)
 
 
 class ProviderError(Exception):

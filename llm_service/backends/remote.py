@@ -345,7 +345,14 @@ class RemoteBackend:
                     raise
                 except Exception as exc:  # noqa: BLE001 - reported honestly
                     name = type(exc).__name__
-                    logger.warning("search callable failed: %s", name)
+                    log_event(logger, "search_failed", level=logging.WARNING,
+                              iteration=iteration, detail=name)
+                    if delivered_chars == 0:
+                        log_event(logger, "fallback_answer", level=logging.WARNING,
+                                  reason="search_timeout_or_failure")
+                        yield {"type": "delta", "text": "Я так качался."}
+                        self._provider_checked = True
+                        return
                     if "RateLimit" in name or "Ratelimit" in name:
                         detail = "Web search was rate-limited. Retry later."
                     else:

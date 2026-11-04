@@ -91,8 +91,8 @@ def validate_settings(raw: dict) -> dict:
     if pre_roll_ms < 0 or pre_roll_ms > max_utterance_ms:
         raise ValueError("settings: audio.pre_roll_ms must not exceed the utterance limit")
 
-    _integer(conversation, "history_turns", "conversation", 0, 20)
-    _integer(conversation, "max_prompt_chars", "conversation", 500, 20000)
+    _integer(conversation, "history_turns", "conversation", 0, 1_000_000)
+    _integer(conversation, "max_prompt_chars", "conversation", 500, 1_000_000)
 
     threshold = _number(vad, "threshold", "vad", 0.01, 0.99)
     neg_threshold = _number(vad, "neg_threshold", "vad", 0.0, 0.99)
@@ -112,10 +112,11 @@ def validate_settings(raw: dict) -> dict:
     _integer(llm, "n_ctx", "llm", 512, 131072)
     _integer(llm, "n_batch", "llm", 32, 4096)
     _integer(llm, "n_threads", "llm", 1, 32)
-    _integer(llm, "max_tokens", "llm", 1, 2048)
+    _integer(llm, "max_tokens", "llm", 1, 32768)
     _number(llm, "temperature", "llm", 0.0, 2.0)
     _number(llm, "top_p", "llm", 0.0, 1.0)
     _number(llm, "repeat_penalty", "llm", 0.0, 4.0)
+    _integer(llm, "remote_max_tokens", "llm", 1, 32768) if "remote_max_tokens" in llm else None
     _text(llm, "system_prompt", "llm")
     _text(llm, "model", "llm")
 

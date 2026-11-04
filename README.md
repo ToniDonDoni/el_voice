@@ -478,6 +478,17 @@ ordinary Elden Ring conversation need not search. The configured backend is `ddg
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
+## Runtime limits
+
+Configured in `workspace/settings.json` and the LLM-service environment: conversation
+history 99999 turns / 99999-character prompt budget, local Gemma completion 9999 tokens,
+remote DeepSeek completion 9999 tokens, up to 18 model/tool iterations, 9999-character
+search snippets and a 21 s search timeout. If a provider/search timeout leaves no answer,
+the assistant speaks the fallback line `Я так качался.` instead of staying silent. Local
+mode is still bounded by the Gemma context window (`n_ctx`), so the very large prompt
+budget is fully effective in Remote mode; the voice utterance limits (VAD, TTS chunks)
+remain as configured.
+
 ## Remote search behaviour
 
 Remote mode uses a search-oriented system prompt (`llm.remote_system_prompt` in

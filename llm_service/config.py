@@ -23,10 +23,10 @@ DEFAULT_PORT = 8100
 DEFAULT_MODE = "local"
 DEFAULT_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash"
-DEFAULT_MAX_ITERATIONS = 4
+DEFAULT_MAX_ITERATIONS = 18
 DEFAULT_MAX_SEARCH_RESULTS = 5
-DEFAULT_SEARCH_SNIPPET_CHARS = 250
-DEFAULT_SEARCH_TIMEOUT = 10.0
+DEFAULT_SEARCH_SNIPPET_CHARS = 9999
+DEFAULT_SEARCH_TIMEOUT = 21.0
 DEFAULT_REQUEST_TIMEOUT = 75.0
 
 MODE_ENV = "EL_VOICE_LLM_MODE"
@@ -216,14 +216,14 @@ def load_config() -> ServiceConfig:
         settings=settings,
         history_turns=int(conversation["history_turns"]),
         max_prompt_chars=int(conversation["max_prompt_chars"]),
-        max_iterations=_integer(ITERATIONS_ENV, DEFAULT_MAX_ITERATIONS, 1, 6),
+        max_iterations=_integer(ITERATIONS_ENV, DEFAULT_MAX_ITERATIONS, 1, 64),
         max_search_results=_integer(
             SEARCH_RESULTS_ENV, DEFAULT_MAX_SEARCH_RESULTS, 1, 10
         ),
         search_snippet_chars=_integer(
-            SEARCH_SNIPPET_ENV, DEFAULT_SEARCH_SNIPPET_CHARS, 50, 1000
+            SEARCH_SNIPPET_ENV, DEFAULT_SEARCH_SNIPPET_CHARS, 50, 20000
         ),
-        search_timeout=_number(SEARCH_TIMEOUT_ENV, DEFAULT_SEARCH_TIMEOUT, 1.0, 30.0),
+        search_timeout=_number(SEARCH_TIMEOUT_ENV, DEFAULT_SEARCH_TIMEOUT, 1.0, 60.0),
         search_provider=_text(os.environ.get(SEARCH_PROVIDER_ENV), "ddgs").lower(),
         remote=remote,
     )

@@ -407,6 +407,17 @@ async def _run_generation(
     except BackendError as exc:
         log_event(logger, "generate_error", level=logging.ERROR, code=exc.code,
                   duration_ms=round((time.monotonic() - started) * 1000))
+        timeout_like = exc.code in {
+            "provider_call_failed", "provider_timeout", "provider_unavailable",
+            "provider_rate_limited", "search_unavailable", "max_iterations",
+            "tool_call_incomplete",
+        }
+        if not assistant and timeout_like:
+            log_event(logger, "fallback_answer", level=logging.WARNING, reason=exc.code)
+            await _send(conn, {"type": "delta", "turn_id": turn_id,
+                               "text": "Я так качался."})
+            await _send(conn, {"type": "done", "turn_id": turn_id, "chars": 0})
+            return
         if cancel.is_set():
             await _send(conn, {"type": "cancelled", "turn_id": turn_id})
         else:

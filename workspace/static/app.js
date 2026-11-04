@@ -31,6 +31,7 @@ const dom = {
   latency: document.getElementById('latency'),
   barge: document.getElementById('barge'),
   playbackStop: document.getElementById('playback-stop'),
+  audioState: document.getElementById('audio-state'),
   error: document.getElementById('error'),
 };
 
@@ -162,11 +163,13 @@ class VoiceClient {
     this.latestTurnId = null;
     this.turnEnded = null;
     this.playbackDoneSent = false;
+    this.audioChunks = 0;
     this.capture = null;
     this.playback = null;
     this.statusTimer = null;
     this.turns = new Map();
     this.echoState = 'unknown';
+    this.audioChunks = 0;
   }
 
   // -- public controls ----------------------------------------------------
@@ -361,6 +364,7 @@ class VoiceClient {
   _handleJson(message) {
     switch (message.type) {
       case 'ready':
+        this._updateAudioState();
         if (this.readyWaiter) this.readyWaiter.resolve(message);
         break;
       case 'state':
@@ -509,6 +513,13 @@ class VoiceClient {
       currentTurn: null,
       lastChunkAt: 0,
     };
+    this._updateAudioState();
+  }
+
+  _updateAudioState() {
+    if (!dom.audioState) return;
+    const context = this.playback && this.playback.context;
+    dom.audioState.textContent = `${this.audioChunks} chunks · ctx ${context ? context.state : 'n/a'}`;
   }
 
   _scheduleAudio(buffer) {
@@ -539,6 +550,11 @@ class VoiceClient {
     this.playback.currentTurn = turnId;
     this.playback.lastChunkAt = performance.now();
     this.playback.sources.add(source);
+    this.audioChunks += 1;
+    this._updateAudioState();
+    if (context.state !== 'running') {
+      context.resume().then(() => this._updateAudioState()).catch(() => {});
+    }
     source.onended = () => {
       if (!this.playback) return;
       this.playback.sources.delete(source);

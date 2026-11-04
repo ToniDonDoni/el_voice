@@ -168,7 +168,8 @@ def make_langchain_search_tool(search: WebSearch, observer=None):
         started_at = time.monotonic()
         if observer:
             observer("tool_call_started", tool_name="web_search", tool_invocation_id=invocation_id,
-                     tool_call_id=call_id, backend=getattr(search, "backend", "configured"))
+                     tool_call_id=call_id, query=query[:240],
+                     backend=getattr(search, "backend", "configured"))
         try:
             payload = await search.tool_payload(query)
             try:

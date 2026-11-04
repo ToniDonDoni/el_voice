@@ -163,6 +163,23 @@ class AgentStreamContractTests(unittest.IsolatedAsyncioTestCase):
             allow_finish.set()
             await stream.aclose()
 
+    async def test_missing_final_model_update_does_not_count_as_success(self):
+        with self.assertRaisesRegex(RuntimeError, "provider_tool_loop_failed"):
+            await self.run_stream([
+                updated("model", model("", [commit_call()])),
+                updated("tools", commit_result()),
+                text_delta("partial"),
+            ])
+
+    async def test_reject_mixed_search_and_answer_commit(self):
+        with self.assertRaisesRegex(RuntimeError, "provider_tool_loop_failed"):
+            await self.run_stream([
+                updated("model", model("", [
+                    commit_call(),
+                    {"name": "web_search", "id": "search", "args": {"query": "latest"}},
+                ])),
+            ])
+
     async def test_uncommitted_answer_is_not_spoken(self):
         with self.assertRaisesRegex(RuntimeError, "provider_tool_loop_failed"):
             await self.run_stream([text_delta("unsafe"), updated("model", model("unsafe"))])

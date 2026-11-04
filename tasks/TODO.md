@@ -2,3 +2,4 @@
   - [x] Implementation in `workspace/` (streaming VAD, Whisper, Gemma streaming, Silero `b_lez`, barge-in, reconnects).
   - [x] Development-sandbox end-to-end self-test passes (12 checks).
   - [ ] Real container + Mac browser acceptance (P0/P1): `docker compose restart voice`, open http://localhost:8765, then record latency and privacy evidence.
+- [ ] [Review follow-ups for the voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION-Review.md): single conversation context, 44.1 kHz resampling, turn ids across sessions, VAD wrapper parity, playback on disconnect. Not started.

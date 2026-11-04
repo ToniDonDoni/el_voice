@@ -24,6 +24,9 @@ const dom = {
   pill: document.getElementById('state-pill'),
   start: document.getElementById('start'),
   stop: document.getElementById('stop'),
+  volume: document.getElementById('volume'),
+  volumeValue: document.getElementById('volume-value'),
+  mute: document.getElementById('mute'),
   level: document.getElementById('level'),
   messages: document.getElementById('messages'),
   components: document.getElementById('components'),
@@ -170,6 +173,9 @@ class VoiceClient {
     this.turns = new Map();
     this.echoState = 'unknown';
     this.audioChunks = 0;
+    this.volume = 1;
+    this.muted = false;
+    this._loadVolumePreferences();
   }
 
   // -- public controls ----------------------------------------------------
@@ -506,14 +512,69 @@ class VoiceClient {
       context = new AudioContext({ latencyHint: 'interactive' });
     }
     await context.resume();
+    const gain = context.createGain();
+    gain.gain.value = this.muted ? 0 : this.volume;
+    gain.connect(context.destination);
     this.playback = {
       context,
+      gain,
       sources: new Set(),
       playHead: 0,
       currentTurn: null,
       lastChunkAt: 0,
     };
     this._updateAudioState();
+  }
+
+  _loadVolumePreferences() {
+    try {
+      const storedVolume = window.localStorage.getItem('elvoice-volume');
+      if (storedVolume !== null) {
+        this.volume = Math.max(0, Math.min(1, Number(storedVolume) / 100));
+      }
+      this.muted = window.localStorage.getItem('elvoice-muted') === '1';
+    } catch (error) {
+      /* storage may be unavailable; defaults are fine */
+    }
+    if (dom.volume) {
+      dom.volume.value = String(Math.round(this.volume * 100));
+    }
+    this._renderVolume();
+  }
+
+  _renderVolume() {
+    if (dom.volumeValue) {
+      dom.volumeValue.textContent = `${Math.round(this.volume * 100)}%`;
+    }
+    if (dom.mute) {
+      dom.mute.textContent = this.muted ? 'Unmute' : 'Mute';
+      dom.mute.setAttribute('aria-pressed', this.muted ? 'true' : 'false');
+    }
+    if (this.playback && this.playback.gain) {
+      this.playback.gain.gain.value = this.muted ? 0 : this.volume;
+    }
+  }
+
+  _setVolume(value) {
+    this.volume = Math.max(0, Math.min(1, value));
+    if (this.volume > 0) this.muted = false;
+    try {
+      window.localStorage.setItem('elvoice-volume', String(Math.round(this.volume * 100)));
+      window.localStorage.setItem('elvoice-muted', this.muted ? '1' : '0');
+    } catch (error) {
+      /* storage may be unavailable */
+    }
+    this._renderVolume();
+  }
+
+  _toggleMute() {
+    this.muted = !this.muted;
+    try {
+      window.localStorage.setItem('elvoice-muted', this.muted ? '1' : '0');
+    } catch (error) {
+      /* storage may be unavailable */
+    }
+    this._renderVolume();
   }
 
   _updateAudioState() {
@@ -544,7 +605,7 @@ class VoiceClient {
     }
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(context.destination);
+    source.connect(this.playback.gain);
     const startAt = Math.max(context.currentTime + 0.04, this.playback.playHead);
     this.playback.playHead = startAt + audioBuffer.duration;
     this.playback.currentTurn = turnId;
@@ -666,6 +727,8 @@ class VoiceClient {
 const client = new VoiceClient();
 dom.start.addEventListener('click', () => client.start());
 dom.stop.addEventListener('click', () => client.stop());
+dom.volume.addEventListener('input', (event) => client._setVolume(Number(event.target.value) / 100));
+dom.mute.addEventListener('click', () => client._toggleMute());
 window.addEventListener('beforeunload', () => {
   if (client.wantSession) {
     try {

@@ -18,6 +18,13 @@
       <div class="row">
         <button id="start" class="btn primary" type="button" disabled>Start conversation</button>
         <button id="stop" class="btn" type="button" disabled>Stop</button>
+        <label class="volume">
+          Volume
+          <input id="volume" type="range" min="0" max="100" step="5" value="100"
+                 aria-label="Playback volume">
+          <span id="volume-value">100%</span>
+        </label>
+        <button id="mute" class="btn" type="button" aria-pressed="false">Mute</button>
       </div>
       <div class="meter" aria-hidden="true"><div id="level"></div></div>
       <p class="notice">

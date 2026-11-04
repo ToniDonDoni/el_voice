@@ -159,7 +159,9 @@ async def stream_agent(
                     tool_count += 1
                     if tool_count > max_tool_calls:
                         raise RuntimeError("provider_tool_loop_failed")
-                    observe("agent_tool_call", tool_name=name, tool_call_id=call_id)
+                    query = str((call.get("args") or {}).get("query", ""))[:240]
+                    observe("agent_tool_call", tool_name=name, tool_call_id=call_id,
+                            query=query)
                     yield {"type": "tool_call", "name": name,
                            "tool_call_id": call_id, "result_count": 0}
                 continue

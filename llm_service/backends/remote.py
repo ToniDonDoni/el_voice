@@ -163,7 +163,7 @@ class RemoteBackend:
             max_retries=0,
             streaming=True,
             temperature=float(llm_cfg["temperature"]),
-            max_tokens=int(llm_cfg["max_tokens"]),
+            max_tokens=int(llm_cfg.get("remote_max_tokens", llm_cfg["max_tokens"])),
             # OpenCode Go asks agent clients to identify themselves and to send a
             # stable session id per conversation; it uses the header for routing
             # and prompt caching. The value is not a credential.
@@ -214,6 +214,7 @@ class RemoteBackend:
             )
         conversation = _to_langchain(messages)
         tool_budget = self._config.max_iterations
+        delivered_chars = 0
 
         for iteration in range(1, self._config.max_iterations + 1):
             if cancel.is_set():
@@ -244,6 +245,7 @@ class RemoteBackend:
                         continue
                     if pending is not None:
                         yield {"type": "delta", "text": pending}
+                        delivered_chars += len(pending)
                     pending = text
             except BackendError:
                 raise
@@ -256,6 +258,19 @@ class RemoteBackend:
             if not tool_requested:
                 if pending:
                     yield {"type": "delta", "text": pending}
+                    delivered_chars += len(pending)
+                if delivered_chars == 0:
+                    log_event(logger, "empty_answer", level=logging.WARNING,
+                              iteration=iteration, chunks=chunk_count)
+                    if iteration < self._config.max_iterations:
+                        from langchain_core.messages import HumanMessage
+                        conversation.append(HumanMessage(
+                            content="Ответь на вопрос кратко по-русски, одним-двумя предложениями."
+                        ))
+                        continue
+                    fallback = "Не удалось получить ответ. Попробуй переформулировать вопрос."
+                    log_event(logger, "empty_answer_fallback", level=logging.WARNING)
+                    yield {"type": "delta", "text": fallback}
                 self._provider_checked = True
                 log_event(logger, "answer_done", iterations=iteration)
                 return

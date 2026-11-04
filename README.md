@@ -192,6 +192,9 @@ baked into the image and need `docker compose ... build voice`.
 | Silero v4 Cyrillic, selected voice `b_lez` (male Lezghian) | models.silero.ai | 34 MB |
 | Silero VAD v5.1.2 streaming ONNX | snakers4/silero-vad (MIT) | 2.3 MB |
 
+Local Voice needs all four models. Remote Voice needs Whisper, Silero TTS and VAD for local
+speech processing, but **not Gemma**: the remote LLM service does not mount `models/`.
+
 `models.json` pins Hugging Face commit revisions and publisher checksums, plus the VAD model
 URL and SHA-256. `tools/download_models.py` verifies SHA-256 for large weights and Git blob
 checksums for small configuration files, resumes partial downloads, and records local SHA-256
@@ -200,7 +203,8 @@ receipts. Re-run the download service to continue an interrupted download:
 ```sh
 docker compose run --rm download
 docker compose run --rm download python /opt/el-voice/download_models.py --verify
-docker compose exec voice python /opt/el-voice/check_environment.py
+docker compose -f compose.yaml -f compose.local.yaml exec voice \
+  python /opt/el-voice/check_environment.py
 ```
 
 The voice application verifies every model file against the local receipt before loading it.
@@ -217,8 +221,9 @@ The VAD model URL is pinned to the upstream `v5.1.2` release tag and the file is
 SHA-256 in `models.json`. It is a plain ONNX graph loaded by ONNX Runtime; no pickle is
 involved. The image built before this change does not contain the new manifest entry, so
 `models.json` and `tools/download_models.py` in the image are older than the repository. If
-the VAD file has to be (re)downloaded, rebuild the image once with `docker compose build
-voice` so the download service uses the updated manifest. The voice service itself does not
+the VAD file has to be (re)downloaded, rebuild the image once with
+`docker compose -f compose.yaml -f compose.local.yaml build voice` so the download service
+uses the updated manifest. The voice service itself does not
 read `models.json`; it verifies the file against the receipt in `models/.download-receipts.json`.
 
 Gemma has its own terms and Silero model licensing must be checked with the publisher; these

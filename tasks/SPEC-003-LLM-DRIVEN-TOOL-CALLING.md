@@ -1,4 +1,4 @@
-# SPEC-001: LLM-Driven Tool Calling
+# SPEC-003: LLM-Driven Tool Calling
 
 ## 1. Problem and Current State
 - Regex decides whether web search is needed.

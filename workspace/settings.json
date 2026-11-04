@@ -28,5 +28,14 @@
     "min_speech_ms": 240,
     "pre_roll_ms": 320,
     "max_utterance_seconds": 45
+  },
+  "audio": {
+    "max_buffered_audio_ms": 2000,
+    "packet_duration_ms": 800
+  },
+  "speech": {
+    "minimum_chunk_chars": 18,
+    "first_chunk_max_chars": 60,
+    "max_chunk_chars": 80
   }
 }

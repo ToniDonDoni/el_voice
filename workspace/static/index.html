@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=spec-001-review">
+  <script src="/static/app.js?v=spec-001-review" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -40,6 +40,11 @@
         <button id="stop-button" class="stop-button" type="button" hidden>End session</button>
         <div class="vad-indicator" id="vad-indicator"><span></span><span></span><span></span><span></span><span></span></div>
         <span class="live-label" id="live-label">MIC OFF</span>
+      </div>
+      <div class="playback-controls" aria-label="Assistant playback volume">
+        <button id="mute-button" class="text-button" type="button" aria-pressed="false">Mute</button>
+        <label for="volume-control">Voice volume</label>
+        <input id="volume-control" type="range" min="0" max="1" step="0.05" value="1" aria-label="Voice volume">
       </div>
     </section>
 

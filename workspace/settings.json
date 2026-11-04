@@ -1,0 +1,8 @@
+{
+  "tts": {
+    "model": "tts/v4_cyrillic.pt",
+    "speaker": "b_lez",
+    "sample_rate": 24000,
+    "cpu_threads": 4
+  }
+}

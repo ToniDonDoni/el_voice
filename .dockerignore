@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!requirements.lock
+!models.json
+!tools/
+!tools/check_environment.py
+!tools/download_models.py
+
+# Reference archives
+**/*.mht
+**/*.mhtml

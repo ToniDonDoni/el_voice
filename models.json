@@ -1,0 +1,48 @@
+{
+  "description": "Publisher assets for the first CPU voice pipeline. No reviewed-author assets are used.",
+  "assets": [
+    {
+      "path": "llm/gemma-3-1b-it-Q4_K_M.gguf",
+      "url": "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/f9c28bcd85737ffc5aef028638d3341d49869c27/gemma-3-1b-it-Q4_K_M.gguf",
+      "size": 806058240,
+      "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135",
+      "license": "Gemma Terms of Use"
+    },
+    {
+      "path": "stt/small/config.json",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json",
+      "size": 2370,
+      "git_blob_sha1": "e5047537059bd8f182d9ca64c470201585015187",
+      "license": "MIT"
+    },
+    {
+      "path": "stt/small/tokenizer.json",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
+      "size": 2203239,
+      "git_blob_sha1": "7818adb6de9fa3064d3ff81226fdd675be1f6344",
+      "license": "MIT"
+    },
+    {
+      "path": "stt/small/vocabulary.txt",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
+      "size": 459861,
+      "git_blob_sha1": "c9074644d9d1205686f16d411564729461324b75",
+      "license": "MIT"
+    },
+    {
+      "path": "stt/small/model.bin",
+      "url": "https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin",
+      "size": 483546902,
+      "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+      "license": "MIT"
+    },
+    {
+      "path": "tts/v4_cyrillic.pt",
+      "url": "https://models.silero.ai/models/tts/cyr/v4_cyrillic.pt",
+      "sha256": null,
+      "license": "CC-BY-NC-SA-4.0",
+      "integrity_note": "No independent publisher SHA256 was available during recipe preparation. Download from the official HTTPS host and record a local SHA256 receipt. This is first-download trust, not publisher attestation. Do not execute arbitrary replacement .pt files.",
+      "size": 35431527
+    }
+  ]
+}

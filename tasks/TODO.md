@@ -1,7 +1,7 @@
 - [ ] [Implement local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
   - [x] Implementation in `workspace/` (streaming VAD, Whisper, Gemma streaming through the
     internal LLM service, Silero `b_lez`, barge-in, reconnects).
-  - [x] Development-sandbox end-to-end self-test passes (21 checks with both services).
+  - [x] Development-sandbox end-to-end self-test passes (23 checks with both services).
   - [ ] Real container + Mac browser acceptance (P0/P1): start the Local graph, open
     http://localhost:8765, then record latency and privacy evidence.
 - [ ] [Review follow-ups for the voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION-Review.md):

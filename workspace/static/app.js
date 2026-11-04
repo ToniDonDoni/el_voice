@@ -400,6 +400,9 @@ class VoiceClient {
   _handleJson(message) {
     switch (message.type) {
       case 'ready':
+        // A fresh server session always starts with interruption enabled, so the
+        // stored preference must be pushed to it before the answer starts.
+        this._sendConfig();
         this.turns.clear();
         this._flushAll();
         this.latestTurnId = null;

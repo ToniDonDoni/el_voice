@@ -220,7 +220,7 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
         await asyncio.sleep(0.1)
         status_off = await asyncio.to_thread(
             fetch_json, f"http://127.0.0.1:{port}/api/status")
-        record("interruption can be disabled from the UI",
+        record("config message disables interruption server-side (client wiring is browser-only)",
                (status_off.get("session") or {}).get("barge_in") is False,
                repr((status_off.get("session") or {}).get("barge_in")))
         await harness.send_json({"type": "config", "barge_in": True})

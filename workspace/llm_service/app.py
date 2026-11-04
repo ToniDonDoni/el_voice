@@ -201,7 +201,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                 elif event_type == "sources":
                                     sources = event.get("sources", [])
                                     await queue.put(("event", {"type": "sources", "sources": sources[:5],
-                                                               "tool_call_id": event.get("tool_call_id", "")}))
+                                                               "tool_call_id": event.get("tool_call_id", ""),
+                                                               "status": event.get("status", "success"),
+                                                               "error_code": event.get("error_code")}))
                                 elif event_type == "tool_call":
                                     await queue.put(("event", {"type": "tool_call", "name": "web_search",
                                                                  "tool_call_id": event.get("tool_call_id", ""),
@@ -281,6 +283,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                        event_index=stream_event_index,
                                        event_type=event.get("type"),
                                        tool_call_id=event.get("tool_call_id"),
+                                       tool_status=event.get("status"),
+                                       error_code=event.get("error_code"),
                                        text_chars=len(event.get("text", ""))
                                        if isinstance(event.get("text"), str) else 0)
                         yield (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()

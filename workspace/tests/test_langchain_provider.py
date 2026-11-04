@@ -45,7 +45,6 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
             AIMessage(content="", tool_calls=[{
                 "id": "call-search", "name": "web_search", "args": {"query": "current Axe counter guide"}
             }]),
-            AIMessage(content="Search completed"),
             AIMessage(content="The guide recommends a Silver Edge for Axe."),
         ])
         provider = object.__new__(OpenCodeLangChainProvider)
@@ -111,6 +110,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
                 json={"text": "latest Dota patch"},
             )
         events = [json.loads(line) for line in response.iter_lines() if line]
-        self.assertEqual(events[-1]["type"], "error")
-        self.assertEqual(events[-1]["code"], "search_rate_limited")
+        fallback = next(event for event in events if event["type"] == "replace")
+        self.assertEqual(fallback["fallback_reason"], "search_rate_limited")
+        self.assertEqual(events[-1]["type"], "done")
         self.assertNotIn("OPENCODE_GO_API_KEY", response.text)

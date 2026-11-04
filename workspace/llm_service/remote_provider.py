@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 from contextvars import ContextVar
+from contextlib import aclosing
 import json
 import logging
 import os
@@ -333,15 +334,19 @@ class OpenCodeLangChainProvider:
                 system_prompt=SYSTEM_PROMPT,
             )
             self._observe_tool_event("agent_run_started")
-            async for event in stream_agent(
+            nested = stream_agent(
                 agent, messages, cancelled,
                 max_tool_calls=self.tool_iterations,
                 max_snippet_chars=getattr(getattr(self, "search", None), "max_snippet_chars", 500),
                 observe=self._observe_tool_event,
-            ):
-                if cancelled.is_set():
-                    return
-                yield event
+            )
+            # The outer provider may be closed while yielding an event.
+            # Close the graph before resetting this turn's ContextVars.
+            async with aclosing(nested):
+                async for event in nested:
+                    if cancelled.is_set():
+                        return
+                    yield event
             if not cancelled.is_set():
                 self._observe_tool_event(
                     "agent_run_completed",

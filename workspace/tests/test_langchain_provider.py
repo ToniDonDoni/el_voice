@@ -10,6 +10,7 @@ from unittest.mock import patch
 try:
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
     from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+    from langchain_core.outputs import ChatGenerationChunk
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
@@ -72,6 +73,60 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("What should I buy against Axe?", [message.content for message in seen])
         self.assertIn("Silver Edge can help against Berserker's Call.", [message.content for message in seen])
         self.assertIn("Find a current guide for that item", [message.content for message in seen])
+
+    async def test_real_langchain_streams_first_speech_delta_before_model_finishes(self):
+        class PausingModel(FakeMessagesListChatModel):
+            def __init__(self):
+                super().__init__(responses=[AIMessage(content="unused")])
+                object.__setattr__(self, "release", asyncio.Event())
+                object.__setattr__(self, "final_started", asyncio.Event())
+                object.__setattr__(self, "bound_tool_counts", [])
+
+            def bind_tools(self, tools, **kwargs):
+                self.bound_tool_counts.append((len(tools), kwargs.get("tool_choice")))
+                return self
+
+            async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+                final = any(
+                    isinstance(message, ToolMessage)
+                    and message.name == "begin_final_answer"
+                    for message in messages
+                )
+                if not final:
+                    yield ChatGenerationChunk(message=AIMessageChunk(
+                        content="", tool_call_chunks=[{
+                            "name": "begin_final_answer", "args": "{}",
+                            "id": "commit-1", "index": 0,
+                        }]
+                    ))
+                    return
+                self.final_started.set()
+                yield ChatGenerationChunk(message=AIMessageChunk(content="Early"))
+                await self.release.wait()
+                yield ChatGenerationChunk(message=AIMessageChunk(content=" reply"))
+
+        model = PausingModel()
+        provider = object.__new__(OpenCodeLangChainProvider)
+        provider.model = model
+        provider.search_tool = make_langchain_search_tool(WebSearch())
+        provider.tool_iterations = 3
+        generator = provider.stream(
+            "Explain one thing briefly", [], asyncio.Event(),
+            session_id="a" * 32, turn_id="b" * 32,
+        )
+        try:
+            first = await asyncio.wait_for(anext(generator), timeout=3.0)
+            self.assertEqual(first, {"type": "delta", "text": "Early"})
+            self.assertTrue(model.final_started.is_set())
+            self.assertFalse(model.release.is_set(),
+                             "Speech must arrive before final model completion")
+            model.release.set()
+            remaining = [event async for event in generator]
+            self.assertEqual(remaining, [{"type": "delta", "text": " reply"}])
+            self.assertIn((0, "none"), model.bound_tool_counts)
+        finally:
+            model.release.set()
+            await generator.aclose()
 
     async def test_cancel_closes_graph_before_turn_context_reset(self):
         closed = []

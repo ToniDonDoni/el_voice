@@ -38,10 +38,12 @@ barge-in, and latency acceptance scenarios without rebuilding unless dependencie
   the voice service's port 8000 is never published directly.
 - Browser microphone capture and playback run on the Mac; no host audio-device mount.
 - The voice service uses an internal network and has no direct host-published port. Nginx
-  joins internal networks to publish the browser endpoint and has no outbound bridge.
+  joins the internal network and a standard bridge so Docker can publish the browser endpoint;
+  this gives the proxy general network egress capability.
 - Local LLM joins only the internal network and mounts Gemma read-only. Remote LLM joins the
-  internal network plus an outbound bridge and is the only runtime service with provider-key
-  access. The download service uses egress only during model preparation.
+  internal network plus a standard egress bridge for OpenCode inference and web search, and is
+  the only runtime service with provider-key access. The download service uses egress only
+  during model preparation.
 - Local and Remote Voice are separate Compose override files. Always stop one mode before
   starting the other; both use the same host port and service names.
 - Never mount the home directory, Docker socket, credentials, or unrelated projects.

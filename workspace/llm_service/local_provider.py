@@ -65,7 +65,7 @@ class LocalGemmaProvider:
         self.lock = threading.Lock()
 
     async def stream(self, text: str, history: list[dict[str, str]],
-                     cancelled: asyncio.Event) -> AsyncIterator[dict[str, Any]]:
+                     cancelled: asyncio.Event, session_id: str = "") -> AsyncIterator[dict[str, Any]]:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history,
                     {"role": "user", "content": text}]
         loop = asyncio.get_running_loop()

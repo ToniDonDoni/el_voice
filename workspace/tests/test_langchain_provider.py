@@ -58,7 +58,8 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         events = [event async for event in provider.stream(
-            "Find a current guide for that item", history, asyncio.Event()
+            "Find a current guide for that item", history, asyncio.Event(),
+            session_id="a" * 32,
         )]
 
         self.assertEqual([event["type"] for event in events], ["tool_call", "sources", "delta"])

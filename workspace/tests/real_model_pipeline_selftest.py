@@ -6,6 +6,7 @@ import asyncio
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,23 @@ from voice_pipeline import SAMPLE_RATE, VoiceRuntime
 
 
 def _run_llm(runtime: VoiceRuntime, prompt: str, history: list[dict[str, str]]) -> str:
-    return "".join(runtime.llm_stream(prompt, threading.Event(), history)).strip()
+    async def collect() -> str:
+        session_id = uuid.uuid4().hex
+        turn_id = uuid.uuid4().hex
+        pieces = []
+        async for event in runtime.llm_stream(
+            prompt,
+            threading.Event(),
+            history,
+            session_id=session_id,
+            turn_id=turn_id,
+        ):
+            if event.get("type") == "delta":
+                pieces.append(str(event.get("text", "")))
+        await runtime.clear_llm_session(session_id)
+        return "".join(pieces).strip()
+
+    return asyncio.run(collect())
 
 
 def _resample_to_stt(pcm: bytes, source_rate: int) -> np.ndarray:
@@ -66,16 +83,30 @@ async def main() -> None:
                 if stage == "stt":
                     runtime.transcribe(speech, cancel_event)
                     return
-                iterator = runtime.llm_stream(transcript, cancel_event, [])
-                try:
-                    next(iterator, None)
-                    cancel_at = time.monotonic()
-                    cancel_event.set()
-                    for _item in iterator:
-                        pass
-                    residuals.append((time.monotonic() - cancel_at) * 1000)
-                finally:
-                    iterator.close()
+
+                async def cancel_after_first_delta():
+                    session_id = uuid.uuid4().hex
+                    stream = runtime.llm_stream(
+                        transcript,
+                        cancel_event,
+                        [],
+                        session_id=session_id,
+                        turn_id=uuid.uuid4().hex,
+                    )
+                    try:
+                        async for event in stream:
+                            if event.get("type") == "delta":
+                                cancel_at = time.monotonic()
+                                cancel_event.set()
+                                async for _remaining in stream:
+                                    pass
+                                residuals.append((time.monotonic() - cancel_at) * 1000)
+                                break
+                    finally:
+                        await stream.aclose()
+                        await runtime.clear_llm_session(session_id)
+
+                asyncio.run(cancel_after_first_delta())
 
             worker = asyncio.create_task(asyncio.to_thread(invoke))
             await asyncio.to_thread(started.wait)
@@ -94,15 +125,25 @@ async def main() -> None:
     first_token = threading.Event()
 
     def cancel_during_first_token():
-        iterator = runtime.llm_stream(transcript, prompt_cancel, [])
-        try:
+        async def consume():
+            session_id = uuid.uuid4().hex
+            stream = runtime.llm_stream(
+                transcript,
+                prompt_cancel,
+                [],
+                session_id=session_id,
+                turn_id=uuid.uuid4().hex,
+            )
             prompt_started.set()
-            next(iterator, None)
-            first_token.set()
-            for _item in iterator:
-                pass
-        finally:
-            iterator.close()
+            try:
+                async for _event in stream:
+                    first_token.set()
+                    break
+            finally:
+                await stream.aclose()
+                await runtime.clear_llm_session(session_id)
+
+        asyncio.run(consume())
 
     prompt_worker = asyncio.create_task(asyncio.to_thread(cancel_during_first_token))
     await asyncio.to_thread(prompt_started.wait)

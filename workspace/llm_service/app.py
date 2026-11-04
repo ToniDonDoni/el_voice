@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from contextlib import asynccontextmanager, suppress
+from contextlib import aclosing, asynccontextmanager, suppress
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException
@@ -165,21 +165,25 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                 async def produce() -> None:
                     try:
                         history = current.contexts.trimmed_history(state.history)
-                        async for event in current.provider.stream(request.text, history, cancelled):
-                            if cancelled.is_set():
-                                break
-                            event_type = event.get("type")
-                            if event_type == "delta":
-                                piece = str(event.get("text", ""))[:4000]
-                                if piece:
-                                    reply_parts.append(piece)
-                                    await queue.put(("event", {"type": "delta", "text": piece}))
-                            elif event_type == "sources":
-                                sources = event.get("sources", [])
-                                await queue.put(("event", {"type": "sources", "sources": sources[:5]}))
-                            elif event_type == "tool_call":
-                                await queue.put(("event", {"type": "tool_call", "name": "web_search",
-                                                             "result_count": min(5, max(0, int(event.get("result_count", 0))))}))
+                        provider_stream = current.provider.stream(
+                            request.text, history, cancelled, session_id=session_id,
+                        )
+                        async with aclosing(provider_stream):
+                            async for event in provider_stream:
+                                if cancelled.is_set():
+                                    break
+                                event_type = event.get("type")
+                                if event_type == "delta":
+                                    piece = str(event.get("text", ""))[:4000]
+                                    if piece:
+                                        reply_parts.append(piece)
+                                        await queue.put(("event", {"type": "delta", "text": piece}))
+                                elif event_type == "sources":
+                                    sources = event.get("sources", [])
+                                    await queue.put(("event", {"type": "sources", "sources": sources[:5]}))
+                                elif event_type == "tool_call":
+                                    await queue.put(("event", {"type": "tool_call", "name": "web_search",
+                                                                 "result_count": min(5, max(0, int(event.get("result_count", 0))))}))
                         if not cancelled.is_set() and reply_parts:
                             current.contexts.remember(state, request.text, "".join(reply_parts))
                             await queue.put(("event", {"type": "done"}))

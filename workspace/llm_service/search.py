@@ -54,9 +54,9 @@ def search_sync(query: str, backend: str, max_results: int,
 
 class WebSearch:
     def __init__(self, backend: str | None = None, max_results: int = 5,
-                 timeout_seconds: float = 6.0, max_snippet_chars: int = 500,
+                 timeout_seconds: float = 10.0, max_snippet_chars: int = 500,
                  max_concurrent: int = 2):
-        self.backend = backend or os.getenv("WEB_SEARCH_BACKEND", "duckduckgo")
+        self.backend = backend or os.getenv("WEB_SEARCH_BACKEND", "auto")
         if self.backend not in {"auto", "duckduckgo", "bing", "brave", "google", "mojeek", "startpage", "yandex", "yahoo", "wikipedia"}:
             raise ValueError("WEB_SEARCH_BACKEND is not a supported search provider")
         self.max_results = min(5, max(1, max_results))

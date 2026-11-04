@@ -9,12 +9,10 @@ remain in the voice path. The requested Remote defaults are
 `https://opencode.ai/zen/go/v1` and `deepseek-v4.1-flash`; an explicitly validated
 same-provider documentation endpoint override is supported.
 
-GPT-6.1 Sol High independently reviewed the SPEC-002 diff and approved cycle 3
-with no blocking findings. This is a **code-review approval, not full acceptance**.
-The new ARM64 image was not built or started, no user API key was supplied or
-used, no live OpenCode request or internet search was made, and no browser/mic
-conversation was run. Existing acceptance criteria remain intact; the requested
-configurable-interruption criterion is additive.
+The acceptance criteria below are copied by name and status from SPEC-002; they
+have not been weakened. This report separates real provider and synthetic audio
+evidence from the still-unverified physical browser microphone run. The requested
+configurable-interruption criterion remains additive.
 
 ## Verification performed
 
@@ -22,48 +20,58 @@ configurable-interruption criterion is additive.
   - `PYTHONPATH=workspace python -m unittest discover -s workspace/tests -p 'test_remote_voice.py'` — 20 passed.
   - `PYTHONPATH=workspace python -m unittest discover -s workspace/tests -p 'test_langchain_provider.py'` — 3 passed using the actual pinned LangChain graph (`langchain==1.4.8`).
   - `PYTHONPATH=workspace python -m unittest discover -s workspace/tests -p 'test_llm_client.py'` — 3 passed using HTTPX 0.28.1 and the actual client/service API boundary.
-- Existing container regression suite: `docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_*.py'` — 44 passed, 6 expected skips because the already-running image predates the new LangChain/HTTPX tests. The container was not rebuilt, restarted, or otherwise changed.
+- Active branch: `codex/display-build-revision`. Remote Compose is currently running on ARM64: voice and LLM are healthy; Nginx publishes `127.0.0.1:8765->8080/tcp`.
+- Host `curl` to `/healthz` returned ready. `/api/status` reported `ready=true`, `mode=remote`, VAD/STT/LLM/TTS ready, and revision `1fe259374fa0f31bd4738f270e31034b1ac385be-dirty`.
+- The supplied public SSH-tunnel `/api/status` endpoint returned HTTP 200 and `ready=true`, `mode=remote` when TLS verification was disabled for diagnosis. Default certificate verification failed with `CERTIFICATE_VERIFY_FAILED`; public HTTPS trust is therefore not verified.
+- Read the existing user-provided API environment file and copied its `OPENCODE_GO_API_KEY` into the repository's ignored `.env`; values match, `.env` mode is `0600`, and Git ignores it. Docker inspection confirmed the nonempty key is present in `el-voice-llm-1` and absent from voice and Nginx. The key was not printed, logged, or staged.
+- A real streaming request through the running Remote LLM service returned a Russian Dota answer from the configured OpenCode Go provider; it emitted text deltas followed by `done` and no error.
+- A live search request through the same service emitted `tool_call`, five source results, answer deltas, and `done` with no error. This verifies the live search/provider path, but not the full browser display or source-click behavior.
+- A synthetic spoken Russian question was generated with local Silero `b_lez`, sent as audio through the Nginx `/ws/voice` endpoint, transcribed by local Whisper, answered by the live Remote provider, and synthesized locally. The saved smoke script returned 23 `ELVA` audio packets (831,600 PCM bytes at 24 kHz) and completed playback acknowledgements without a pipeline error. The first packet arrived 3,803 ms after the server marked speech ended. This was synthetic audio, not speech captured from the physical microphone or proof of audible playback on the Mac.
+- Runtime status currently records five synthetic response samples: speech end to first audio p50 3,807 ms and p95 5,310 ms; no interruption-latency samples exist. These acknowledgements do not represent physical browser playback and do not meet SPEC-002's ten-turn measurement requirement.
+- The browser page rendered Remote mode and the interruption checkbox checked by default. Starting a session ended back at `MIC OFF`; no connected browser microphone session or audible output was established. Physical browser audio acceptance remains unverified.
+- Reproducible live checks are saved in `workspace/tools/remote_live_smoke.py` and `workspace/tools/remote_synthetic_audio_smoke.py`; their exact commands are listed below. They contain no key, persist no audio/transcript, and report only event types, lengths, counts, and timings.
+- Full Python regression suite in the running LLM container: 50 passed, including the new cancellation regression. Node audio-capture and browser-playback suites: 2 passed. Both Local and Remote Compose configurations validate.
+- Static/runtime Compose checks confirm only Remote LLM receives the provider key and only Remote LLM is attached to the dedicated `llm_egress` network. Nginx also joins the ordinary `ingress` bridge so the browser port is reachable; that bridge gives Nginx general outbound access, which conflicts with a strict reading of the unchanged Network and credentials criterion.
 - `node --test workspace/tests/audio_capture.test.cjs workspace/tests/browser_playback.test.cjs` — both suites passed.
-- Compose validation passed for both modes without a key:
-  - `docker compose --env-file /dev/null -f compose.yaml -f compose.local.yaml config --quiet`
-  - `docker compose --env-file /dev/null -f compose.yaml -f compose.remote.yaml config --quiet`
-- Static Compose inspection confirmed only Remote LLM receives `OPENCODE_GO_API_KEY` and external egress; voice/download do not receive the key; LLM has no host-published port; only Nginx publishes loopback port 8765. Local LLM receives the Gemma mount; Remote LLM does not. Remote model preparation is key-independent.
+- Compose validation passed for both modes:
+  - `docker compose -f compose.yaml -f compose.local.yaml config -q`
+  - `docker compose -f compose.yaml -f compose.remote.yaml config -q`
+- Live Remote provider, contextual follow-up, and web-search smoke:
+  - `docker compose -f compose.yaml -f compose.remote.yaml exec llm python /workspace/tools/remote_live_smoke.py`
+- Synthetic voice request through Nginx, local Whisper, live Remote LLM, and local Silero:
+  - `docker compose -f compose.yaml -f compose.remote.yaml exec voice python /workspace/tools/remote_synthetic_audio_smoke.py`
+- Static Compose inspection confirmed only Remote LLM receives `OPENCODE_GO_API_KEY` and is attached to the dedicated `llm_egress` network; voice/download do not receive the key; LLM has no host-published port; only Nginx publishes loopback port 8765. Nginx's separate ordinary `ingress` network allows general outbound access. Local LLM receives the Gemma mount; Remote LLM does not. Remote model preparation is key-independent.
 - Real LangChain graph tests cover context-aware search planning, tool-call/result pairing, and search failure codes through service error mapping. A synthetic client test covers cancellation and truncated EOF. Search/provider fakes were used; they do not prove live external integrations.
-- Lock generation was repeated byte-for-byte; pinned dependency compatibility check passed. `git diff --check` passed. `.env` remains ignored and was not read or staged.
-- Independent GPT-6.1 Sol High cycle 3 review: **PASS / APPROVED**, with no findings. Review artifact: [`SPEC-002-REMOTE-VOICE-LLM-SERVICE-REVIEW.md`](SPEC-002-REMOTE-VOICE-LLM-SERVICE-REVIEW.md).
+- Lock generation was repeated byte-for-byte; pinned dependency compatibility check passed. `.env` is ignored and was not staged; its key was read in memory only for the local copy check.
+- Historical GPT-6.1 Sol High cycle 3 review approved a narrowed code diff, but missed cancellation cleanup at the provider async-generator boundary. The issue is fixed and the final re-review confirmed the header, cancellation, reproducibility, and Remote-mode guard changes. Final verdict remains **REQUEST_CHANGES** because strict Nginx egress isolation and live browser/ten-turn acceptance are incomplete; the SPEC criteria were not changed.
 
 ## Acceptance criteria
 
 | Original criterion | Status | Evidence and remaining work |
 | --- | --- | --- |
-| Two launch modes | PARTIAL | Both keyless Compose configurations validate; service graph, mounts, readiness definitions, network layout, and start/stop/switch instructions were inspected. Neither new graph was built, started, or switched. Linux ARM64 runtime remains unverified. |
-| Separate LLM boundary | PARTIAL | Voice code routes generation through the internal HTTP client; both providers implement the documented session/turn streaming API. Client-to-service tests cover events, history, cancellation, and clearing. Network streaming timing and a complete browser-to-service turn remain unverified. |
-| Live remote provider | NOT VERIFIED | Requested model/base URL, explicit endpoint override, credential location, redacted error handling, and redirect prohibition are covered by code/config checks. No account key or live inference request was used. |
-| LangChain agent and context | PARTIAL | Actual pinned `create_agent` graph tests cover contextual search planning, complete paired tool messages, bounded history, and session isolation/clear behavior with deterministic fakes. Real provider follow-up quality and provider tool compatibility remain unverified. |
-| Real web search | PARTIAL | Typed search tool, limits, public HTTPS filtering, error handling, process cancellation, and bounded admission are tested with fakes. No live DDG results or grounded spoken answer were observed; any backend policy/credential requirement remains to be confirmed. |
-| Voice streaming | PARTIAL | Existing incremental audio/browser regressions pass; only final answer deltas are routed to TTS, and source/tool events have a UI path. No live Remote browser conversation or proof of first audio before full DeepSeek generation was performed. |
-| Interruption and recovery | PARTIAL | Deterministic tests cover cancellation across the client/service boundary, closing a pending read, search worker termination, stale turns, and error/EOF handling. Live generation/search/playback interruption, provider-side cancellation, reconnect, and stop/restart remain unverified. |
+| Two launch modes | PARTIAL | Remote ARM64 Compose is healthy and serves through the published loopback port. Local configuration validates and the prior local real-model self-test passed, but a clean Local-to-Remote-to-Local switch was not run in this verification pass. |
+| Separate LLM boundary | PARTIAL | The live voice WebSocket synthetic-audio run traversed Nginx, local Whisper, internal LLM service, Remote provider, and local TTS. The Local service was separately exercised in the prior local self-test. The browser microphone run remains unverified. |
+| Live remote provider | PASS (live text scope) | With the key mounted only in the LLM service, a real DeepSeek response streamed through OpenCode Go. The answer completed without provider errors. Live tool use is separately evidenced below. |
+| LangChain agent and context | PARTIAL | Actual pinned `create_agent` graph tests cover contextual planning, paired tool messages, bounded history, and isolation with deterministic tests. The persisted live smoke completed a normal Dota turn, contextual follow-up, and search turn in one session. Live session isolation/clearing and tool-pair trimming against the provider remain unverified. |
+| Real web search | PARTIAL | Live Remote request emitted a tool call, five search sources, and a grounded answer with no service error. Full spoken browser answer/source rendering and failure/throttle behavior against a live backend remain unverified. |
+| Voice streaming | PARTIAL | Synthetic audio traversed the real Nginx WebSocket, Whisper, Remote provider and Silero path and returned 23 audio packets. No physical-microphone browser session or audible Mac playback was confirmed; first audio before full answer generation is not established by the current evidence. |
+| Interruption and recovery | PARTIAL | Deterministic tests cover cancellation boundaries, stale turns, error/EOF, and retry behavior. Live interruption during provider/search/playback, provider-side cancellation, reconnect, and stop/restart remain unverified. |
 | Configurable interruption | PASS (deterministic scope) | The rendered browser checkbox was verified checked by default and toggled off/on. WebSocket tests in Local and Remote flows verify that disabled interruption lets the active answer finish, enabled interruption accepts a new turn, and a later turn is accepted after a failure. The full connected browser/microphone flow remains unverified. |
-| Local regression | PARTIAL | Existing regressions pass; local Gemma loading verifies the model receipt, tokenizer assets are packaged, and Local mode has no remote fallback/egress. The new Local service was not started for a real offline conversation. Inherited SPEC-001 acceptance remains incomplete. |
-| Network and credentials | PARTIAL | Static Compose inspection confirms the key and intentional egress are limited to Remote LLM, with no LLM host port and redirects disabled. Runtime network/log inspection against the new containers was not performed. |
+| Local regression | PARTIAL | Local mode was previously started healthy and its real-model synthetic STT -> Local LLM -> TTS self-test passed. The current stack is Remote. This did not verify physical microphone capture or audible browser playback. Inherited SPEC-001 acceptance remains incomplete. |
+| Network and credentials | PARTIAL / REQUIREMENT CONFLICT | Runtime inspection confirms the key exists only in Remote LLM, is sourced from ignored `.env`, and is absent from voice/Nginx. Remote LLM alone has the dedicated `llm_egress` network; Nginx's ordinary ingress bridge also permits general outbound traffic, so strict “only remote provider service” egress is not met. |
 | Data and tool boundaries | PARTIAL | UI disclosure, in-memory context, local audio path, constrained search schema/URL filtering, no shell tool, and disabled external tracing are implemented and inspected. Rendered Remote UI and runtime storage were not exercised. Transcript/reply logs retain the inherited SPEC-001 privacy conflict. |
-| Reproducible deployment | PARTIAL | Dependencies and image base are pinned, lock is reproducible, preparation/start/switch commands are documented, and source mounts remain. New ARM64 Docker image build was not run. |
-| Focused checks | PASS (deterministic scope) | 20 service tests, 3 actual LangChain graph tests, 3 HTTPX client tests, 44 existing-container tests (6 dependency skips), 2 Node suites, Compose configs, lock reproducibility, and diff check passed. These checks do not stand in for live integration. |
-| Live browser acceptance | NOT VERIFIED | No ten-turn remote conversation, latency p50/p95, live search/no-search comparison, interruption timing, headphones, reconnect, or switch-back run was performed. |
+| Reproducible deployment | PARTIAL | Both Compose configurations validate and the Remote ARM64 stack is healthy with Nginx publishing loopback port 8765. The supplied public tunnel returns Remote status over HTTP 200 only when certificate verification is disabled; the public certificate chain needs repair/verification. |
+| Focused checks | PASS (deterministic scope) | The current-container Python suite passed 50 tests after the new cancellation regression; both Node suites passed; both Compose configurations validated. Live provider/search and synthetic voice checks are separately recorded above. |
+| Live browser acceptance | NOT VERIFIED | Remote UI is loaded, but its microphone session returned to MIC OFF. The ten-turn run, browser source rendering, real-device playback, search/no-search latency set, interruption timing, reconnect, headphones, and switch-back run are incomplete. Public status responds, but TLS certificate validation fails. |
 | Criterion-by-criterion report | PASS | This report records every original SPEC-002 acceptance item and distinguishes deterministic evidence from pending deployment/live acceptance. |
 
 ## Remaining acceptance work
 
-Interruption-control regression checks passed in the existing container
-(21 Python pipeline test methods) and both Node browser/audio suites. These deterministic
-checks do not replace the connected browser/microphone acceptance run.
-
-The user must build and start one mode at a time using the commands in the
-repository README. Remote acceptance additionally needs the user-provided key in
-the ignored local `.env`; do not paste it into chat or a shell command. Then verify
-the configured OpenCode endpoint/model and real streaming/tool calls, live search,
-ten representative browser turns and contextual follow-ups, first-audio timing,
-interruptions during model/search/playback, recovery, and switch back to Local.
-Record search/no-search latency and interruption latency separately. Inspect
-logs/storage and confirm the UI disclosure. Until those observations exist, the
-corresponding criteria above remain partial or unverified.
+The ignored `.env` now contains the key copied from the user's API environment file;
+the secret should remain local and must not be pasted into chat, logged, or committed.
+The live Remote provider and search work, and a synthetic audio request returned
+local TTS packets. Remaining acceptance requires a connected browser microphone and
+audible playback, at least ten representative turns with latency measurements,
+interruption/reconnect/stop-start checks, a Local/Remote switch-back, and valid
+TLS verification on the public endpoint. Resolve the Nginx egress-capability conflict against the
+unchanged Network and credentials criterion before marking the overall task accepted.

@@ -29,7 +29,24 @@ button { font: inherit; }
 .topbar { display: flex; align-items: center; justify-content: space-between; }
 .brand-group { display: flex; min-width: 0; align-items: center; gap: 12px; }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--text); font-size: 15px; font-weight: 800; letter-spacing: -.03em; text-decoration: none; }
-.build-revision { overflow: hidden; max-width: 190px; border-left: 1px solid var(--line); padding-left: 12px; color: #82908a; font: 500 9px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
+.build-revision {
+  position: fixed;
+  z-index: 1000;
+  top: 8px;
+  left: 8px;
+  overflow: hidden;
+  max-width: min(260px, calc(100vw - 16px));
+  border: 1px solid rgba(135,147,151,.32);
+  border-radius: 7px;
+  padding: 5px 8px;
+  color: #c0cbc7;
+  background: rgba(11,14,17,.94);
+  box-shadow: 0 3px 14px rgba(0,0,0,.32);
+  font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid rgba(142,240,196,.4); border-radius: 9px; color: var(--mint); font: 500 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .local-tag, .eyebrow, .live-label { font: 500 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
 .local-tag { display: flex; align-items: center; gap: 8px; color: #a7b7b1; }

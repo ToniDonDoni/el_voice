@@ -167,6 +167,8 @@ class RemoteConfigurationTests(unittest.TestCase):
     def test_current_information_intent_routes_to_search(self):
         self.assertTrue(needs_search("What is the latest Dota patch?"))
         self.assertTrue(needs_search("Проверь актуальный курс сегодня"))
+        self.assertTrue(needs_search("Какая погода в Москве?"))
+        self.assertTrue(needs_search("I'm not sure where this item drops"))
         self.assertFalse(needs_search("How do I lane against Axe?"))
 
 
@@ -247,7 +249,7 @@ class StreamingContractTests(unittest.TestCase):
             def __init__(self):
                 self.histories = []
 
-            async def stream(self, text, history, cancelled):
+            async def stream(self, text, history, cancelled, session_id=""):
                 self.histories.append(list(history))
                 if "search" in text.lower():
                     yield {"type": "tool_call", "name": "web_search", "result_count": 1}
@@ -295,7 +297,7 @@ class StreamingContractTests(unittest.TestCase):
 
     def test_provider_failure_is_redacted_and_not_reported_as_success(self):
         class FailingProvider:
-            async def stream(self, _text, _history, _cancelled):
+            async def stream(self, _text, _history, _cancelled, session_id=""):
                 yield {"type": "delta", "text": "partial"}
                 raise RuntimeError("provider_rate_limited")
 
@@ -316,7 +318,7 @@ class StreamingContractTests(unittest.TestCase):
 
     def test_empty_provider_output_is_an_error_not_a_success(self):
         class EmptyProvider:
-            async def stream(self, _text, _history, _cancelled):
+            async def stream(self, _text, _history, _cancelled, session_id=""):
                 if False:
                     yield None
 
@@ -341,7 +343,7 @@ class StreamingContractTests(unittest.TestCase):
                 self.started = threading.Event()
                 self.cancelled = threading.Event()
 
-            async def stream(self, _text, _history, _cancelled):
+            async def stream(self, _text, _history, _cancelled, session_id=""):
                 self.started.set()
                 try:
                     await asyncio.Event().wait()
@@ -377,7 +379,7 @@ class StreamingContractTests(unittest.TestCase):
 
     def test_active_session_limit_is_an_http_error(self):
         class Provider:
-            async def stream(self, _text, _history, _cancelled):
+            async def stream(self, _text, _history, _cancelled, session_id=""):
                 yield {"type": "delta", "text": "ok"}
 
             async def close(self):
@@ -404,7 +406,7 @@ class StreamingContractTests(unittest.TestCase):
 
     def test_stream_reaches_eof_after_backpressured_burst(self):
         class BurstProvider:
-            async def stream(self, _text, _history, _cancelled):
+            async def stream(self, _text, _history, _cancelled, session_id=""):
                 for index in range(20):
                     yield {"type": "delta", "text": str(index)}
 

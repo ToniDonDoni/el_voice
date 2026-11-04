@@ -89,16 +89,26 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
                 and "latest Dota patch" in str(message.get("content", ""))
                 for message in history
             )
-            if payload.get("tools") and has_search_prompt:
-                has_tool_result = any(message.get("role") == "tool" for message in history)
-                if not has_tool_result:
+            if payload.get("tools"):
+                has_search_result = any(
+                    message.get("role") == "tool"
+                    and message.get("name") == "web_search"
+                    for message in history
+                )
+                if has_search_prompt and not has_search_result:
                     return sse({"tool_calls": [{
                         "index": 0,
                         "id": "call-search",
                         "type": "function",
-                        "function": {"name": "web_search", "arguments": "{\"query\":\"latest Dota patch\"}"},
+                        "function": {"name": "web_search",
+                                     "arguments": json.dumps({"query": "latest Dota patch"})},
                     }]})
-                return sse({"content": "Search completed"})
+                return sse({"tool_calls": [{
+                    "index": 0,
+                    "id": "call-finish",
+                    "type": "function",
+                    "function": {"name": "begin_final_answer", "arguments": "{}"},
+                }]})
             return sse({"content": "Axe обычно играет на позиции оффлейнера."})
 
         class Search:
@@ -138,8 +148,8 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         self.assertEqual(second[-1]["type"], "done")
         self.assertEqual(third[-1]["type"], "done")
         self.assertEqual([event["type"] for event in searched], ["tool_call", "sources", "delta", "done"])
-        self.assertEqual(len(captured), 5, "one agent execution may make multiple provider requests")
-        expected = [session_a, session_a, session_b, session_c, session_c]
+        self.assertEqual(len(captured), 9, "planning, optional search, and speech share one agent")
+        expected = [session_a, session_a, session_a, session_a, session_b, session_b, session_c, session_c, session_c]
         actual = [request.headers.get("x-opencode-session", "") for request in captured]
         self.assertEqual(actual, ["ses_" + session_id for session_id in expected])
         self.assertTrue(all(request.headers.get("user-agent") == "EL-Voice/0.1" for request in captured))
@@ -151,7 +161,7 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
                         [sorted(payload) for payload in captured_payloads])
         log_events = [json.loads(record.getMessage()) for record in provider_log.records]
         responses = [event for event in log_events if event["event"] == "remote_provider_http_response"]
-        self.assertEqual(len(responses), 5)
+        self.assertEqual(len(responses), 9)
         self.assertTrue(all(event["provider_host"] == "opencode.ai" for event in responses))
         self.assertTrue(all(event["model"] == "deepseek-v4.1-flash" for event in responses))
         self.assertTrue(all(event["status_code"] == 200 for event in responses))
@@ -168,7 +178,7 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         self.assertEqual(tool_events[0]["turn_id"], "4" * 32)
         self.assertIn("timestamp", tool_events[0])
         per_turn = [event for event in responses if event["turn_id"] == "4" * 32]
-        self.assertEqual([event["request_index"] for event in per_turn], [1, 2])
+        self.assertEqual([event["request_index"] for event in per_turn], [1, 2, 3])
         self.assertNotIn("test-key", " ".join(record.getMessage() for record in provider_log.records))
         self.assertNotIn("Find the latest Dota patch notes", " ".join(
             record.getMessage() for record in provider_log.records

@@ -21,8 +21,12 @@ import struct
 import threading
 import time
 
+from .context import ConversationHistory, build_messages
 from .tts import SpeakableChunker
+from .turnids import TurnIdSource
 from .vad import FRAME_BYTES, SpeechSegmenter
+
+_DEFAULT_TURN_IDS = TurnIdSource()
 
 logger = logging.getLogger("elvoice.pipeline")
 
@@ -35,7 +39,7 @@ class Turn:
     """One user utterance and the assistant answer that belongs to it."""
 
     __slots__ = (
-        "id", "cancel", "task", "state", "cancelled", "audio_sent",
+        "id", "cancel", "task", "state", "cancelled", "audio_sent", "answer_text",
         "speech_end_ts", "stt_done_ts", "first_token_ts", "first_audio_ts",
     )
 
@@ -46,6 +50,7 @@ class Turn:
         self.state = "capturing"
         self.cancelled = False
         self.audio_sent = False
+        self.answer_text = ""
         self.speech_end_ts: float | None = None
         self.stt_done_ts: float | None = None
         self.first_token_ts: float | None = None
@@ -101,7 +106,7 @@ class VoiceSession:
     """One browser microphone session with one active turn at a time."""
 
     def __init__(self, session_id: str, cfg: dict, engines, metrics: Metrics,
-                 send_json, send_audio):
+                 send_json, send_audio, next_turn_id=None):
         self.session_id = session_id
         self._cfg = cfg
         self._engines = engines
@@ -115,6 +120,12 @@ class VoiceSession:
         self._closed = False
         self._vad_failures = 0
         self._output_rate = int(cfg["audio"]["output_sample_rate"])
+        self._next_turn_id = next_turn_id or _DEFAULT_TURN_IDS.next
+        self._turn_ids: dict[int, int] = {}
+        conversation_cfg = cfg.get("conversation", {})
+        self._conversation = ConversationHistory(int(conversation_cfg.get("history_turns", 4)))
+        self._max_prompt_chars = int(conversation_cfg.get("max_prompt_chars", 4000))
+        self.last_prompt: dict = {}
 
     # -- session lifecycle -------------------------------------------------
     async def start(self) -> dict:
@@ -123,6 +134,9 @@ class VoiceSession:
         self._engines.vad.reset_states()
         self._segmenter.reset()
         self._pending.clear()
+        self._turn_ids.clear()
+        self._conversation.reset()
+        self.last_prompt = {}
         self._state = "listening"
         logger.info("session %s: ready", self.session_id)
         vad_cfg = self._cfg["vad"]
@@ -144,6 +158,9 @@ class VoiceSession:
 
     async def stop(self) -> None:
         logger.info("session %s: stop requested", self.session_id)
+        self._conversation.reset()
+        self.last_prompt = {}
+        self._turn_ids.clear()
         self._closed = True
         turn = self._turn
         if turn is not None:
@@ -185,8 +202,10 @@ class VoiceSession:
                 logger.warning("VAD inference failed: %s", type(exc).__name__)
             return 0.0
 
-    async def _on_onset(self, turn_id: int) -> None:
+    async def _on_onset(self, sequence: int) -> None:
         onset_ts = time.perf_counter()
+        turn_id = self._next_turn_id()
+        self._turn_ids[sequence] = turn_id
         previous = self._turn.state if self._turn is not None else "none"
         logger.info("turn=%s: onset (previous=%s)", turn_id, previous)
         if self._turn is not None and not self._turn.cancelled:
@@ -198,7 +217,8 @@ class VoiceSession:
 
     async def _on_utterance_end(self, event: dict) -> None:
         turn = self._turn
-        if turn is None or turn.id != event["turn_id"] or turn.cancelled:
+        expected = self._turn_ids.pop(event["turn_id"], None)
+        if turn is None or expected is None or turn.id != expected or turn.cancelled:
             return
         logger.info(
             "turn=%s: utterance end speech_ms=%.0f audio_ms=%.0f",
@@ -249,10 +269,12 @@ class VoiceSession:
         logger.info("turn=%s: llm start prompt_chars=%d", turn.id, len(text))
         llm_cfg = self._cfg["llm"]
         tts_cfg = self._cfg["tts"]
-        messages = [
-            {"role": "system", "content": llm_cfg["system_prompt"]},
-            {"role": "user", "content": text},
-        ]
+        messages, self.last_prompt = build_messages(
+            llm_cfg["system_prompt"],
+            self._conversation.as_list(),
+            text,
+            self._max_prompt_chars,
+        )
         chunker = SpeakableChunker(
             int(tts_cfg["min_chunk_chars"]),
             int(tts_cfg["soft_chunk_chars"]),
@@ -275,6 +297,7 @@ class VoiceSession:
                         "turn=%s: first token after %.0f ms",
                         turn.id, (turn.first_token_ts - turn.stt_done_ts) * 1000.0,
                     )
+                turn.answer_text += delta
                 await self._send_json({"type": "assistant_text", "turn_id": turn.id, "delta": delta})
                 for chunk in chunker.feed(delta):
                     if turn.cancelled:
@@ -294,6 +317,7 @@ class VoiceSession:
 
         if turn.cancelled:
             return
+        self._conversation.add_exchange(text, turn.answer_text)
         await self._send_json({"type": "turn_end", "turn_id": turn.id})
         if turn.first_audio_ts is not None and turn.speech_end_ts is not None:
             logger.info(

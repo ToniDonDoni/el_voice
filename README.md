@@ -75,6 +75,12 @@ curl --fail http://localhost:8765/healthz
 
 Open **http://localhost:8765** in a browser and press **Start conversation**.
 
+Microphone capture is resampled to exactly 16 kHz inside the AudioWorklet with a
+two-stage 4 kHz low-pass filter and fractional linear interpolation
+(`workspace/static/resampler.js`), then emitted as 512-sample frames. This avoids the
+44.1 kHz aliasing of a naive decimator and keeps 32/48/96 kHz devices working; verified by
+`workspace/tests/resampler.test.mjs` and `capture-worklet.test.mjs`.
+
 The only published mapping is `127.0.0.1:8765 -> proxy:8080`; Nginx forwards HTTP and
 WebSocket requests to `voice:8000` over the internal network. The voice service has no
 published port and no normal outbound internet route. Nginx joins a separate bridge network
@@ -141,6 +147,10 @@ Runtime. This was selected and characterised before the implementation:
   recurrent state tensor of shape `(2, 1, 128)`. The graph returns a speech probability and
   the next state. State is kept for the whole browser session and reset only when a session
   starts or stops, so silence/speech transitions are classified in context.
+- **Wrapper parity:** the adapter follows the official v5.1.2 `OnnxWrapper` streaming
+  semantics: every 512-sample frame is prefixed with the previous 64 samples of context
+  (576-sample ONNX input), and recurrent state and context are reset together. This is
+  verified against a reference implementation in `workspace/tests/test_vad_parity.py`.
 - **Measured CPU cost:** 0.084 ms per 32 ms frame in the development sandbox — about 0.3 % of
   one CPU core. This is cheap enough to run continuously while the assistant generates and
   speaks, which is what makes hands-free barge-in possible.
@@ -158,6 +168,8 @@ microphone input (the values below are the starting point, not a guarantee):
 | `vad.neg_threshold` | 0.35 | probability below which a frame counts as silence |
 | `vad.min_speech_ms` | 250 | shorter detections are rejected as noise/empty turns |
 | `vad.end_silence_ms` | 550 | silence that finalises the utterance |
+| `conversation.history_turns` | 4 | previous question/answer pairs kept in the prompt |
+| `conversation.max_prompt_chars` | 4000 | character budget for the whole prompt |
 | `audio.pre_roll_ms` | 480 | audio kept before the onset so the first phoneme is not lost |
 | `audio.max_utterance_ms` | 20000 | hard limit that finalises an unbounded utterance |
 
@@ -203,6 +215,12 @@ Source layout (mounted at `/workspace`):
 | `elvoice/pipeline.py` | per-session turn state machine, barge-in, metrics |
 | `static/` | browser UI, capture worklet, WebSocket client, playback queue |
 | `tests/selftest.py` | end-to-end pipeline check (synthetic speech, real models) |
+
+Conversation context is bounded and kept in memory. `settings.json`
+`conversation.history_turns` (default 4) completed question/answer pairs are prepended to
+every prompt and trimmed to `conversation.max_prompt_chars`; whole pairs are dropped oldest
+first and the history is cleared when the session stops. `/api/status` exposes only the
+limits and the last prompt's pair/character counts, never transcript content.
 
 Models are loaded on a background thread so the HTTP process is alive immediately and can
 report readiness while several hundred megabytes of weights load. Loading order is
@@ -310,6 +328,9 @@ barge-in.
 
 - `/healthz` answers as soon as the HTTP process is alive; it does **not** claim that the
   pipeline works.
+- If the WebSocket closes unexpectedly, the browser stops every scheduled audio source,
+  clears the current turn and reconnects with backoff; the server cancels the active turn
+  and releases the session, so old speech never continues across a reconnect.
 - `/api/status` reports `pipeline_ready` and the status of each component (`vad`, `stt`,
   `llm`, `tts`), the active session state, and p50/p95 of the content-free timing metrics.
   The page keeps the Start button disabled until the pipeline is ready.

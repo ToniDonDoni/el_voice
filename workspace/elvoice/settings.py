@@ -59,6 +59,7 @@ def _block(raw: dict, key: str) -> dict:
 def validate_settings(raw: dict) -> dict:
     """Validate cross-component constraints and return the configuration."""
     audio = _block(raw, "audio")
+    conversation = _block(raw, "conversation")
     vad = _block(raw, "vad")
     stt = _block(raw, "stt")
     llm = _block(raw, "llm")
@@ -78,6 +79,9 @@ def validate_settings(raw: dict) -> dict:
         raise ValueError("settings: audio.output_sample_rate must equal tts.sample_rate")
     if pre_roll_ms < 0 or pre_roll_ms > max_utterance_ms:
         raise ValueError("settings: audio.pre_roll_ms must not exceed the utterance limit")
+
+    _integer(conversation, "history_turns", "conversation", 0, 20)
+    _integer(conversation, "max_prompt_chars", "conversation", 500, 20000)
 
     threshold = _number(vad, "threshold", "vad", 0.01, 0.99)
     neg_threshold = _number(vad, "neg_threshold", "vad", 0.0, 0.99)

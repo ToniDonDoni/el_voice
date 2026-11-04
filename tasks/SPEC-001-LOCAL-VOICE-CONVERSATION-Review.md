@@ -108,3 +108,26 @@ All items require the real container and a browser on the Mac, plus the existing
 content-free checks: `python -m compileall -q workspace`, `node --check` for the browser
 scripts, and `workspace/tests/selftest.py` inside the voice container. Record commands,
 measurements, and remaining limitations in README before marking any item complete.
+
+## Implementation status
+
+Implemented on branch `DeepSeek-Flash` with local evidence:
+
+- R1: bounded in-memory context (`workspace/elvoice/context.py`), wired into
+  `pipeline._generate`; prompt statistics are exposed through `/api/status` without content.
+  Verified by `workspace/tests/test_contracts.py`, `tests/test_pipeline_context.py` and the
+  end-to-end `workspace/tests/selftest.py` (3+ consecutive turns, `history_turns=3`).
+- R2: streaming resampler `workspace/static/resampler.js` with a two-stage low-pass filter
+  and fractional interpolation; used by the capture worklet. Verified by
+  `tests/resampler.test.mjs` (44.1/48/32/96 kHz, 60 s count, 10 kHz alias rejection) and
+  `tests/capture-worklet.test.mjs`.
+- R3: process-wide turn id allocator (`workspace/elvoice/turnids.py`) used by every session;
+  verified by `tests/test_pipeline_context.py` and the selftest reconnect checks.
+- R4: VAD adapter now carries the official 64-sample context and 576-sample ONNX input;
+  verified by `tests/test_vad_parity.py` against a reference of the v5.1.2 wrapper.
+- R5: playback is isolated in `workspace/static/playback.js` with per-turn flush and
+  `stopAll()` on socket close; verified by `tests/playback.test.mjs` and the selftest
+  abrupt-disconnect check.
+
+Browser/microphone acceptance (headphones echo behaviour, audible interruption, real
+latency) still has to be run on the target Mac; Docker is unavailable in this environment.

@@ -117,7 +117,11 @@ def _status_payload() -> dict:
             "error": STATE.settings_error,
             "components": {},
         },
-        "session": {"active": active is not None, "state": session_state},
+        "session": {
+            "active": active is not None,
+            "state": session_state,
+            "last_prompt": dict(active["session"].last_prompt) if active is not None else {},
+        },
         "metrics": STATE.metrics.snapshot(),
         "config": {
             "headphones_required": True,
@@ -136,6 +140,10 @@ def _status_payload() -> dict:
                 "min_speech_ms": STATE.cfg["vad"]["min_speech_ms"],
                 "end_silence_ms": STATE.cfg["vad"]["end_silence_ms"],
                 "pre_roll_ms": STATE.cfg["audio"]["pre_roll_ms"],
+            },
+            "conversation": {
+                "history_turns": STATE.cfg["conversation"]["history_turns"],
+                "max_prompt_chars": STATE.cfg["conversation"]["max_prompt_chars"],
             },
             "stt_language": STATE.cfg["stt"]["language"],
             "tts_speaker": STATE.cfg["tts"]["speaker"],

@@ -46,7 +46,10 @@ class SileroVad:
         self.reset_states()
 
     def reset_states(self) -> None:
+        # Official v5.1.2 OnnxWrapper semantics: recurrent state plus the last
+        # 64 samples of audio as context for the next 512-sample chunk.
         self._state = self._np.zeros((2, 1, 128), dtype=self._np.float32)
+        self._context = self._np.zeros((1, 64), dtype=self._np.float32)
 
     def speech_probability(self, frame: bytes) -> float:
         """Return the speech probability for one 512-sample little-endian frame."""
@@ -55,15 +58,17 @@ class SileroVad:
         if samples.size != FRAME_SAMPLES:
             raise ValueError(f"VAD frame must contain {FRAME_SAMPLES} samples")
         audio = samples.astype(np.float32) / 32768.0
+        concatenated = np.concatenate([self._context, audio.reshape(1, -1)], axis=1)
         output, state = self._session.run(
             None,
             {
-                "input": audio.reshape(1, -1),
+                "input": concatenated,
                 "state": self._state,
                 "sr": self._sample_rate,
             },
         )
         self._state = state
+        self._context = concatenated[:, -64:]
         return float(output.reshape(-1)[0])
 
 

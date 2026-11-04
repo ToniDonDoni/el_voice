@@ -13,6 +13,8 @@
 
 'use strict';
 
+import { PlaybackQueue } from './playback.js';
+
 const INPUT_SAMPLE_RATE = 16000;
 const INPUT_FRAME_SAMPLES = 512;
 const OUTPUT_SAMPLE_RATE = 24000;
@@ -250,6 +252,9 @@ class VoiceClient {
           this.ws = null;
         }
         this.latestTurnId = null;
+        this.turnEnded = null;
+        this.playbackDoneSent = false;
+        this._flushAll();
         if (this.readyWaiter) {
           this.readyWaiter.reject(new Error('connection closed'));
           this.readyWaiter = null;
@@ -370,6 +375,10 @@ class VoiceClient {
   _handleJson(message) {
     switch (message.type) {
       case 'ready':
+        this._flushAll();
+        this.latestTurnId = null;
+        this.turnEnded = null;
+        this.playbackDoneSent = false;
         this._updateAudioState();
         if (this.readyWaiter) this.readyWaiter.resolve(message);
         break;
@@ -507,22 +516,12 @@ class VoiceClient {
     try {
       context = new AudioContext({ sampleRate: OUTPUT_SAMPLE_RATE, latencyHint: 'interactive' });
     } catch (error) {
-      // Some browsers refuse a non-device sample rate; buffers keep their own rate
-      // and the audio graph resamples them.
+      // Some browsers refuse a non-device sample rate; buffers keep their own
+      // rate and the audio graph resamples them.
       context = new AudioContext({ latencyHint: 'interactive' });
     }
     await context.resume();
-    const gain = context.createGain();
-    gain.gain.value = this.muted ? 0 : this.volume;
-    gain.connect(context.destination);
-    this.playback = {
-      context,
-      gain,
-      sources: new Set(),
-      playHead: 0,
-      currentTurn: null,
-      lastChunkAt: 0,
-    };
+    this.playback = new PlaybackQueue(context, this.muted ? 0 : this.volume);
     this._updateAudioState();
   }
 
@@ -550,8 +549,8 @@ class VoiceClient {
       dom.mute.textContent = this.muted ? 'Unmute' : 'Mute';
       dom.mute.setAttribute('aria-pressed', this.muted ? 'true' : 'false');
     }
-    if (this.playback && this.playback.gain) {
-      this.playback.gain.gain.value = this.muted ? 0 : this.volume;
+    if (this.playback) {
+      this.playback.setVolume(this.muted ? 0 : this.volume);
     }
   }
 
@@ -597,48 +596,29 @@ class VoiceClient {
     if ((buffer.byteLength - 16) % 2 !== 0) return;
     const pcm = new Int16Array(buffer, 16);
     if (pcm.length === 0) return;
-    const context = this.playback.context;
-    const audioBuffer = context.createBuffer(1, pcm.length, sampleRate);
-    const channel = audioBuffer.getChannelData(0);
-    for (let index = 0; index < pcm.length; index += 1) {
-      channel[index] = pcm[index] / 32768;
-    }
-    const source = context.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(this.playback.gain);
-    const startAt = Math.max(context.currentTime + 0.04, this.playback.playHead);
-    this.playback.playHead = startAt + audioBuffer.duration;
-    this.playback.currentTurn = turnId;
-    this.playback.lastChunkAt = performance.now();
-    this.playback.sources.add(source);
+    this.playback.schedule(turnId, pcm, sampleRate, (id) => this._maybePlaybackDone(id));
     this.audioChunks += 1;
     this._updateAudioState();
-    if (context.state !== 'running') {
-      context.resume().then(() => this._updateAudioState()).catch(() => {});
+    if (this.playback.context.state !== 'running') {
+      this.playback.context.resume().then(() => this._updateAudioState()).catch(() => {});
     }
-    source.onended = () => {
-      if (!this.playback) return;
-      this.playback.sources.delete(source);
-      this._maybePlaybackDone(turnId);
-    };
-    source.start(startAt);
   }
 
   _maybePlaybackDone(turnId) {
     if (!this.playback) return;
     if (this.turnEnded !== turnId) return;
     if (this.playbackDoneSent) return;
-    if (this.playback.sources.size > 0) return;
+    if (this.playback.activeCount() > 0) return;
     this.playbackDoneSent = true;
-    this.playback.playHead = this.playback.context.currentTime + 0.05;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'playback_done', turn_id: turnId }));
     }
   }
 
   _flushTurn(turnId) {
+    if (!this.playback) return;
     const started = performance.now();
-    const stopped = this._stopSources(turnId);
+    const stopped = this.playback.flush(turnId);
     const elapsed = performance.now() - started;
     if (stopped && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({
@@ -653,24 +633,10 @@ class VoiceClient {
     }
   }
 
-  _stopSources(turnId) {
-    if (!this.playback) return false;
-    let stopped = false;
-    for (const source of Array.from(this.playback.sources)) {
-      try {
-        source.stop();
-      } catch (error) { /* already finished */ }
-      this.playback.sources.delete(source);
-      stopped = true;
-    }
-    this.playback.playHead = this.playback.context.currentTime + 0.05;
-    this.playback.currentTurn = null;
-    this.playback.lastChunkAt = 0;
-    return stopped && turnId !== undefined;
-  }
-
   _flushAll() {
-    this._stopSources(null);
+    if (this.playback) {
+      this.playback.stopAll();
+    }
   }
 
   // -- transcript ---------------------------------------------------------

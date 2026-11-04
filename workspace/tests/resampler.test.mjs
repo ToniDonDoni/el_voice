@@ -16,12 +16,16 @@ function check(name, condition, detail = '') {
 function run(inputRate, samples, chunk = samples.length, frameSamples = 512) {
   const resampler = new Resampler(inputRate, 16000, frameSamples);
   const out = [];
+  const frames = [];
   for (let offset = 0; offset < samples.length; offset += chunk) {
     for (const frame of resampler.push(samples.subarray(offset, offset + chunk))) {
+      frames.push(frame);
       out.push(...frame);
     }
   }
-  return { out, tail: resampler.flush() };
+  const tail = resampler.flush();
+  if (tail) out.push(...tail);
+  return { out, frames, tail };
 }
 
 function sine(rate, hz, seconds) {
@@ -38,18 +42,38 @@ function frequencyOf(samples, rate) {
   return (crossings * rate) / samples.length;
 }
 
-for (const inputRate of [48000, 44100]) {
+for (const inputRate of [48000, 44100, 32000, 96000]) {
   const seconds = 2;
-  const { out } = run(inputRate, sine(inputRate, 1000, seconds));
+  const { out, frames, tail } = run(inputRate, sine(inputRate, 1000, seconds));
   const expected = 16000 * seconds;
   check(`${inputRate} Hz input produces 16 kHz sample count`,
         Math.abs(out.length - expected) <= 2, `${out.length} vs ${expected}`);
+  check(`${inputRate} Hz output is delivered in 512-sample frames`,
+        frames.every((frame) => frame.length === 512), `${frames.length} frames`);
+  check(`${inputRate} Hz flush returns only the partial tail`,
+        (tail === null || tail.length < 512),
+        tail ? `${tail.length} tail samples` : 'no tail');
   const frequency = frequencyOf(out, 16000);
   check(`${inputRate} Hz input keeps a 1 kHz tone near 1 kHz`,
         Math.abs(frequency - 1000) < 20, `${frequency.toFixed(1)} Hz`);
   const peak = out.reduce((max, value) => Math.max(max, Math.abs(value)), 0) / 32768;
   check(`${inputRate} Hz input keeps the signal amplitude`,
         peak > 0.3 && peak <= 0.6, `peak ${peak.toFixed(3)}`);
+}
+
+// A 60 s 44.1 kHz capture must produce 960,000 samples at 16 kHz.
+{
+  const { out } = run(44100, sine(44100, 440, 60), 44100);
+  check('60 s of 44.1 kHz capture yields 960000 samples',
+        Math.abs(out.length - 960000) <= 2, `${out.length}`);
+}
+
+// The anti-alias filter must suppress content above the 8 kHz Nyquist limit.
+{
+  const { out } = run(44100, sine(44100, 10000, 1), 1000);
+  const rms = Math.sqrt(out.reduce((sum, value) => sum + (value / 32768) ** 2, 0) / out.length);
+  check('10 kHz content is suppressed before 16 kHz decimation',
+        rms < 0.15, `rms ${rms.toFixed(3)}`);
 }
 
 // Constant signal must survive (no low-frequency loss).
@@ -71,11 +95,11 @@ for (const inputRate of [48000, 44100]) {
 
 // Frames are delivered in exact 512-sample blocks and the tail is flushed.
 {
-  const { out, tail } = run(48000, sine(48000, 500, 0.7), 1234);
-  check('output is delivered in 512-sample frames',
-        out.length % 512 === 0, `${out.length}`);
+  const { frames, tail } = run(48000, sine(48000, 500, 0.7), 1234);
+  check('chunked input still delivers whole 512-sample frames',
+        frames.every((frame) => frame.length === 512), `${frames.length} frames`);
   check('tail flush returns the remaining samples',
-        Array.isArray(tail), typeof tail);
+        tail === null || tail.length < 512, tail ? `${tail.length}` : 'no tail');
 }
 
 console.log();

@@ -39,5 +39,9 @@
     "soft_chunk_chars": 70,
     "max_chunk_chars": 160,
     "first_chunk_chars": 25
+  },
+  "conversation": {
+    "history_turns": 4,
+    "max_prompt_chars": 4000
   }
 }

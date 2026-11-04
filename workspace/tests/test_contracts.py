@@ -23,7 +23,6 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def main() -> int:
     from elvoice.context import build_messages
-    from elvoice.turnids import TurnIdSource
 
     system = "system prompt"
     user = "А какие предметы ему собрать?"
@@ -61,14 +60,14 @@ def main() -> int:
           and all(m["content"] != long_history[0]["content"] for m in trimmed),
           repr(trimmed_stats))
 
-    # R3: turn ids are unique and strictly increasing across sessions.
-    source = TurnIdSource()
-    first_session = [source.next() for _ in range(3)]
-    second_session = [source.next() for _ in range(3)]
-    check("R3 turn ids are unique across sessions",
-          len(set(first_session + second_session)) == 6, repr(first_session + second_session))
-    check("R3 turn ids never restart at 1 on a new session",
-          second_session[0] > first_session[-1], repr((first_session, second_session)))
+    # R1: the total prompt stays within the configured character budget.
+    budgeted, _ = build_messages(system, long_history, user, max_prompt_chars=200)
+    check("R1 total prompt length respects the character budget",
+          sum(len(item["content"]) for item in budgeted) <= 200,
+          repr(sum(len(item["content"]) for item in budgeted)))
+
+    # R3 is behaviourally covered at the session boundary in
+    # tests/test_pipeline_context.py and the end-to-end selftest.
 
     print()
     if FAILURES:

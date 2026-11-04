@@ -296,8 +296,7 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
                 elif kind == "error":
                     record(f"{label} turn completed", False, json.loads(message)["message"])
                     ended = True
-            if context_text is not None:
-                record(f"{label} turn transcribed", True, context_text[:60])
+            record(f"{label} turn transcribed", bool(context_text), (context_text or "")[:60])
             await harness.send_json({"type": "playback_done", "turn_id": context_turn})
 
         # Public status must expose content-free prompt metadata: the previous
@@ -307,6 +306,10 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
         record("conversation context is part of the prompt",
                int(last_prompt.get("history_turns", 0)) >= 2,
                f"history_turns={last_prompt.get('history_turns')} chars={last_prompt.get('chars')}")
+        limits = (status_mid.get("config") or {}).get("conversation") or {}
+        record("conversation limits are exposed without content",
+               int(limits.get("history_turns", 0)) >= 2 and int(limits.get("max_prompt_chars", 0)) > 0,
+               repr(limits))
 
         await harness.send_json({"type": "stop"})
         await harness.close()
@@ -328,8 +331,20 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
         record("turn ids continue across a new session",
                new_turn_id is not None and new_turn_id > max_turn_id,
                f"new={new_turn_id} previous_max={max_turn_id}")
-        await harness.send_json({"type": "stop"})
+        # Abrupt disconnect without a stop message: the server must release the
+        # session and any active turn on its own.
         await harness.close()
+        await websocket.close()
+        released = False
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status_now = await asyncio.to_thread(
+                fetch_json, f"http://127.0.0.1:{port}/api/status")
+            if not (status_now.get("session") or {}).get("active", True):
+                released = True
+                break
+            await asyncio.sleep(0.2)
+        record("server releases the session after an abrupt disconnect", released)
 
     status = wait_http_ready(f"http://127.0.0.1:{port}/api/status", timeout=10)
     metrics = status.get("metrics", {})

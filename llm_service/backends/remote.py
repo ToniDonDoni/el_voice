@@ -268,7 +268,7 @@ class RemoteBackend:
                             content="Ответь на вопрос кратко по-русски, одним-двумя предложениями."
                         ))
                         continue
-                    fallback = "Не удалось получить ответ. Попробуй переформулировать вопрос."
+                    fallback = "Я так качался."
                     log_event(logger, "empty_answer_fallback", level=logging.WARNING)
                     yield {"type": "delta", "text": fallback}
                 self._provider_checked = True

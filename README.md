@@ -10,32 +10,38 @@ Prepare the required voice models for either mode. Run `sh tools/init.sh` first.
 
 ```sh
 sh tools/init.sh
-docker compose -f compose.yaml -f compose.remote.yaml run --rm download
+sh tools/compose.sh -f compose.yaml -f compose.remote.yaml run --rm download
 ```
 
 To use Local Voice instead, download all configured models:
 
 ```sh
-docker compose -f compose.yaml -f compose.local.yaml run --rm download
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml run --rm download
 ```
 
 Start exactly one mode at a time. The user-facing browser endpoint remains `http://localhost:8765`:
 
 ```sh
 # Local Voice
-docker compose -f compose.yaml -f compose.local.yaml up -d --build voice llm proxy
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml up -d --build voice llm proxy
 
 # Stop Local Voice before switching
-docker compose -f compose.yaml -f compose.local.yaml down
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml down
 
 # Remote Voice: put OPENCODE_GO_API_KEY in the ignored local .env file first
-docker compose -f compose.yaml -f compose.remote.yaml up -d --build voice llm proxy
+sh tools/compose.sh -f compose.yaml -f compose.remote.yaml up -d --build voice llm proxy
 
 # Stop Remote Voice before switching back
-docker compose -f compose.yaml -f compose.remote.yaml down
+sh tools/compose.sh -f compose.yaml -f compose.remote.yaml down
 ```
 
-Use the same Compose file pair for all commands that inspect, restart, or stop the selected mode, for example `docker compose -f compose.yaml -f compose.remote.yaml ps` and `logs --follow voice llm proxy`. Do not run both mode graphs together because they share the browser port and service names. Remote defaults are `OPENCODE_GO_BASE_URL=https://opencode.ai/zen/go/v1`, `OPENCODE_GO_MODEL=deepseek-v4.1-flash`, and `WEB_SEARCH_BACKEND=duckduckgo`; if the supplied account requires the documentation endpoint, set `OPENCODE_GO_BASE_URL=https://opencode.ai/inference/go/openai/v1` in `.env`. Both HTTPS paths are explicitly validated; other hosts and paths are rejected. A search provider may impose its own access policy or credential requirements. `OPENCODE_GO_API_KEY` is not a search API key.
+The top-left build badge shows the first 12 characters of the Git commit used to
+start the voice service. Always use `sh tools/compose.sh` for Compose operations:
+it passes the current full commit hash into the container and adds `-dirty` when
+the working tree contains uncommitted changes. Starting with plain `docker
+compose` displays `COMMIT unversioned` unless `EL_VOICE_REVISION` is supplied.
+
+Use the same Compose file pair for all commands that inspect, restart, or stop the selected mode, for example `sh tools/compose.sh -f compose.yaml -f compose.remote.yaml ps` and `logs --follow voice llm proxy`. Do not run both mode graphs together because they share the browser port and service names. Remote defaults are `OPENCODE_GO_BASE_URL=https://opencode.ai/zen/go/v1`, `OPENCODE_GO_MODEL=deepseek-v4.1-flash`, and `WEB_SEARCH_BACKEND=duckduckgo`; if the supplied account requires the documentation endpoint, set `OPENCODE_GO_BASE_URL=https://opencode.ai/inference/go/openai/v1` in `.env`. Both HTTPS paths are explicitly validated; other hosts and paths are rejected. A search provider may impose its own access policy or credential requirements. `OPENCODE_GO_API_KEY` is not a search API key.
 
 The remote model endpoint has not yet been verified with the user's account. The task specification records a difference between the requested base URL and the endpoint advertised in OpenCode Go documentation; confirm it with the supplied account before treating live Remote Voice as accepted. The implementation keeps the requested URL as its default, accepts only the documented same-provider correction above, and reports provider failures without exposing credentials. An empty key leaves the service unready; a nonempty but invalid key produces a redacted authentication error when a request is made. The Remote model download command does not require the key.
 
@@ -66,11 +72,11 @@ Run commands from the repository root:
 
 ```sh
 sh tools/init.sh
-docker compose -f compose.yaml -f compose.local.yaml config --quiet
-docker compose -f compose.yaml -f compose.local.yaml run --rm download
-docker compose -f compose.yaml -f compose.local.yaml run --rm download python /opt/el-voice/download_models.py --verify
-docker compose -f compose.yaml -f compose.local.yaml up -d voice llm proxy
-docker compose -f compose.yaml -f compose.local.yaml ps
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml config --quiet
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml run --rm download
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml run --rm download python /opt/el-voice/download_models.py --verify
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml up -d voice llm proxy
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml ps
 curl --fail http://localhost:8765/healthz
 ```
 
@@ -83,7 +89,7 @@ The only host-published port is `127.0.0.1:8765` on Nginx. The voice service rem
 Follow the voice service logs while speaking:
 
 ```sh
-docker compose -f compose.yaml -f compose.local.yaml logs --follow voice llm proxy
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml logs --follow voice llm proxy
 ```
 
 The local voice logs include structured events for recognized user text (`user_transcript`), assistant text (`assistant_reply` or `assistant_reply_interrupted`), model/session errors, browser playback errors, generated audio chunk sizes, and playback scheduling/latency. This content logging is enabled at the user's request for debugging. Docker may retain these logs, so treat them as conversation history. The application never logs audio payloads and does not save microphone audio or transcripts to `data/`.
@@ -93,24 +99,24 @@ To inspect current readiness and recent diagnostics:
 
 ```sh
 curl --fail http://localhost:8765/api/status
-docker compose -f compose.yaml -f compose.local.yaml logs --since=10m --tail=200 voice llm proxy
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml logs --since=10m --tail=200 voice llm proxy
 ```
 
 `playback_started` means the browser scheduled a generated audio buffer in Web Audio; it cannot prove that sound reached the selected physical output. If the transcript and answer appear but you hear nothing, look for `tts_chunk_ready`, `playback_started`, and `browser_error`; then check the browser tab's output device, system volume, and mute state. A logged browser error or a missing `playback_started` narrows the failure to synthesis, WebSocket delivery, or browser scheduling.
 
 ## Development and verification
 
-Application files under `workspace/` are bind-mounted read-only into the container, so edit them on the host and restart the service to apply changes. Routine source changes do not require an image rebuild:
+Application files under `workspace/` are bind-mounted read-only into the container. Source changes do not require an image rebuild, but recreate the voice service through the wrapper to refresh the displayed commit:
 
 ```sh
-docker compose -f compose.yaml -f compose.local.yaml restart voice llm
-docker compose -f compose.yaml -f compose.local.yaml exec voice python /opt/el-voice/check_environment.py
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml up -d --force-recreate voice llm
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml exec voice python /opt/el-voice/check_environment.py
 ```
 
 Standalone voice synthesis can be checked with:
 
 ```sh
-docker compose -f compose.yaml -f compose.local.yaml exec voice python /workspace/tts_smoke.py --text "Привет, это проверка локального голоса."
+sh tools/compose.sh -f compose.yaml -f compose.local.yaml exec voice python /workspace/tts_smoke.py --text "Привет, это проверка локального голоса."
 ```
 
 The smoke test writes `/data/tts-test.wav`; remove that optional sample after listening if you do not want to keep it. For a full conversation, use the browser at `http://localhost:8765`.

@@ -5,13 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css?v=spec-002-remote">
-  <script src="/static/app.js?v=spec-002-remote" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=build-revision">
+  <script src="/static/app.js?v=build-revision" defer></script>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="EL Voice home"><span class="brand-mark">EL</span><span>EL Voice</span></a>
+      <div class="brand-group">
+        <a class="brand" href="/" aria-label="EL Voice home"><span class="brand-mark">EL</span><span>EL Voice</span></a>
+        <span id="build-revision" class="build-revision" title="Loading source revision">COMMIT —</span>
+      </div>
       <span id="mode-badge" class="local-tag"><span class="local-dot"></span>LOADING MODE</span>
     </header>
 

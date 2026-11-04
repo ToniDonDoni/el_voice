@@ -10,6 +10,8 @@ services:
   voice:
     <<: *voice-image
     user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
+    environment:
+      EL_VOICE_REVISION: ${EL_VOICE_REVISION:-unknown}
     init: true
     volumes:
       - ./workspace:/workspace:ro

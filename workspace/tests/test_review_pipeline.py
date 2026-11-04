@@ -236,6 +236,19 @@ class StartupValidationTests(unittest.TestCase):
                 self.assertEqual(status["stage"], "error")
                 self.assertEqual(status["error"], "ValueError")
 
+    def test_status_exposes_compose_git_revision(self):
+        previous_runtime = app.runtime
+        app.runtime = SimpleNamespace(status_snapshot=lambda: {"ready": True, "stage": "ready"})
+        try:
+            with patch.dict("os.environ", {"EL_VOICE_REVISION": "0123456789abcdef0123456789abcdef01234567"}):
+                response = asyncio.run(app.status())
+            self.assertEqual(
+                json.loads(response.body)["revision"],
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+        finally:
+            app.runtime = previous_runtime
+
 
 class LogPrivacyTests(unittest.TestCase):
     def test_requested_text_and_errors_are_logged_without_audio_payload(self):

@@ -3,6 +3,7 @@ name: el-voice
 services:
   voice:
     environment:
+      EL_VOICE_REVISION: ${EL_VOICE_REVISION:-unknown}
       EL_VOICE_MODE: remote
       LLM_SERVICE_URL: http://llm:8001
     depends_on:
@@ -16,6 +17,7 @@ services:
       context: .
     command: [python, -m, uvicorn, llm_service.app:app, --app-dir, /workspace, --host, 0.0.0.0, --port, "8001"]
     environment:
+      EL_VOICE_REVISION: ${EL_VOICE_REVISION:-unknown}
       EL_VOICE_MODE: remote
       LLM_CONTEXT_TOKEN_BUDGET: "2400"
       OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}

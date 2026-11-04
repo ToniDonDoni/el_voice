@@ -591,10 +591,26 @@ function formatMetric(metric) {
   return `${metric.p50} / ${metric.p95} ms`;
 }
 
+function renderBuildRevision(revision) {
+  const fullRevision = typeof revision === "string" && revision.trim()
+    ? revision.trim().slice(0, 64)
+    : "unknown";
+  const isDirty = fullRevision.endsWith("-dirty");
+  const commit = isDirty ? fullRevision.slice(0, -6) : fullRevision;
+  const shortCommit = commit === "unknown" ? "unversioned" : commit.slice(0, 12);
+  const suffix = isDirty ? "-dirty" : "";
+  const element = document.querySelector("#build-revision");
+  element.textContent = `COMMIT ${shortCommit}${suffix}`;
+  element.title = commit === "unknown"
+    ? "No Git revision was supplied to Docker Compose"
+    : `Git commit ${commit}${isDirty ? " (working tree contains uncommitted changes)" : ""}`;
+}
+
 async function pollStatus() {
   try {
     const response = await fetch("/api/status", { cache: "no-store" });
     const status = await response.json();
+    renderBuildRevision(status.revision);
     renderDiagnostics(status);
     const remote = status.mode === "remote";
     const badge = document.querySelector("#mode-badge");

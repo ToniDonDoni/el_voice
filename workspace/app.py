@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import struct
 import time
@@ -131,7 +132,10 @@ async def healthz() -> JSONResponse:
 
 @app.get("/api/status")
 async def status() -> JSONResponse:
-    return JSONResponse(runtime.status_snapshot())
+    return JSONResponse({
+        **runtime.status_snapshot(),
+        "revision": os.environ.get("EL_VOICE_REVISION", "unknown"),
+    })
 
 
 @app.post("/api/client-error")

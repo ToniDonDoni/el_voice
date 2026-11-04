@@ -96,6 +96,7 @@ window.__elVoiceTest = {
   stopSession,
   reportClientError,
   renderDiagnostics,
+  renderBuildRevision,
   setSessionWanted(value) { sessionWanted = value; },
   getQueueEnd(turnId) { return nextPlaybackTime.get(turnId) || 0; },
   getAssistantText(turnId) { return messageNodes.get("assistant:" + turnId)?.body.textContent || ""; },
@@ -403,6 +404,21 @@ async function run() {
     const report = JSON.parse(socket.sent.at(-1));
     assert.equal(report.type, "client_error");
     assert.equal(report.message, "synthetic browser playback error");
+  });
+
+  await check("top-left build badge shows the source commit", async () => {
+    assert.match(html, /id="build-revision"[^>]*>COMMIT —<\/span>/,
+      "the top bar must reserve a visible source revision badge");
+    const { api, elements } = harness();
+    api.renderBuildRevision("0123456789abcdef0123456789abcdef01234567");
+    const badge = elements.get("#build-revision");
+    assert.equal(badge.textContent, "COMMIT 0123456789ab");
+    assert.equal(badge.title, "Git commit 0123456789abcdef0123456789abcdef01234567");
+    api.renderBuildRevision("0123456789abcdef0123456789abcdef01234567-dirty");
+    assert.equal(badge.textContent, "COMMIT 0123456789ab-dirty");
+    assert.match(badge.title, /uncommitted changes/);
+    api.renderBuildRevision(undefined);
+    assert.equal(badge.textContent, "COMMIT unversioned");
   });
 
   if (failures.length) {

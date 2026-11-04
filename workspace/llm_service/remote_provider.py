@@ -152,6 +152,10 @@ class _ObservedProviderStream(httpx.AsyncByteStream):
             self._emit("provider_response_body_closed_early", transport_eof=False)
         await self.source.aclose()
 SYSTEM_PROMPT = (
+    "You are a tool-using voice assistant. While tools are enabled, do not speak an answer. "
+    "Call web_search when needed, including repeated searches; otherwise call "
+    "begin_final_answer to switch to final speech. Always call begin_final_answer "
+    "before delivering a user-facing answer. Once final speech starts, do not call tools. "
     "You are a concise, practical, Russian-speaking Elden Ring companion. Answer in Russian unless "
     "the user asks for another language. Help with the base game and Shadow of the Erdtree, including "
     "combat, builds, bosses, quests, items, locations, progression, and lore. Tailor advice to the "
@@ -301,7 +305,32 @@ class OpenCodeLangChainProvider:
                      cancelled: asyncio.Event, session_id: str = "",
                      turn_id: str = "") -> AsyncIterator[dict[str, Any]]:
         from langchain.agents import create_agent
-        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain.agents.middleware import wrap_model_call
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+        from langchain.tools import tool
+
+        @tool("begin_final_answer")
+        def begin_final_answer() -> str:
+            """Commit to answering the user; disables further search tools."""
+            return "Answer the user's question now."
+
+        @wrap_model_call
+        async def gate_final_speech(request, handler):
+            committed = any(
+                getattr(item, "type", None) == "tool"
+                and getattr(item, "name", None) == "begin_final_answer"
+                for item in request.state.get("messages", [])
+            )
+            if committed:
+                system = request.system_message
+                prompt = system.content if system is not None else ""
+                return await handler(request.override(
+                    tools=[], tool_choice="none",
+                    system_message=SystemMessage(
+                        content=str(prompt) + "\\nTool use is finished. Speak the final answer."
+                    ),
+                ))
+            return await handler(request.override(tool_choice="required"))
 
         messages: list[Any] = [
             HumanMessage(content=item["content"]) if item["role"] == "user"
@@ -330,8 +359,9 @@ class OpenCodeLangChainProvider:
                 return
             agent = create_agent(
                 model=self.model,
-                tools=[self.search_tool],
+                tools=[self.search_tool, begin_final_answer],
                 system_prompt=SYSTEM_PROMPT,
+                middleware=[gate_final_speech],
             )
             self._observe_tool_event("agent_run_started")
             nested = stream_agent(

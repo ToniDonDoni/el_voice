@@ -161,7 +161,6 @@ class WebSearch:
 def make_langchain_search_tool(search: WebSearch, observer=None):
     from langchain.tools import ToolRuntime, tool
 
-    @tool("web_search")
     async def web_search(query: str, runtime: ToolRuntime) -> str:
         """Search public web pages for current information. Input one concise search query."""
         invocation_id = uuid.uuid4().hex
@@ -192,4 +191,7 @@ def make_langchain_search_tool(search: WebSearch, observer=None):
                          duration_ms=round((time.monotonic() - started_at) * 1000, 1))
             raise
 
-    return web_search
+    # Resolve the injected runtime annotation before tool() inspects this
+    # locally defined function (annotations are postponed in this module).
+    web_search.__annotations__["runtime"] = ToolRuntime
+    return tool("web_search")(web_search)

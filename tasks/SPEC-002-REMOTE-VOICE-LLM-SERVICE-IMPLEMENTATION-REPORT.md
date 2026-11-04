@@ -88,7 +88,7 @@ failure reporting, missing-key error, and redaction of keys/bearer headers.
 EL_VOICE_MODELS=$PWD/models .venv/bin/python workspace/tests/selftest.py --models $PWD/models
 ```
 
-Result: `RESULT: PASS (23 checks)`.
+Result: `RESULT: PASS (24 checks)`.
 
 The check starts the real LLM service (local Gemma backend) and the real voice app in one
 process, then drives the browser WebSocket with synthesised Russian utterances. It verified:

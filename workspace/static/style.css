@@ -283,3 +283,18 @@ footer code { color: #8fb3c4; }
   cursor: pointer;
 }
 .toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+.commit-badge {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  z-index: 20;
+  font: 11px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #6d8a99;
+  background: rgba(8, 14, 19, 0.78);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 8px;
+  pointer-events: none;
+  user-select: text;
+}

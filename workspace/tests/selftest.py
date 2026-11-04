@@ -399,6 +399,9 @@ async def run_check(port: int, models_root: Path, cfg: dict) -> int:
     record("barge-in dispatch latency measured", barge.get("count", 0) >= 1,
            f"p50={barge.get('p50')} ms n={barge.get('count')}")
     record("process still healthy after the session", status.get("components", {}).get("ready", False))
+    record("deployed commit is exposed for the on-screen badge",
+           isinstance(status.get("commit"), str) and len(status["commit"]) >= 6,
+           status.get("commit"))
     record("no content persistence configured", not status.get("config", {}).get("audio_persisted", True))
 
     llm = status.get("llm") or {}

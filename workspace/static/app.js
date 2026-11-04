@@ -41,6 +41,7 @@ const dom = {
   playbackStop: document.getElementById('playback-stop'),
   audioState: document.getElementById('audio-state'),
   error: document.getElementById('error'),
+  commitBadge: document.getElementById('commit-badge'),
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -124,6 +125,9 @@ const ui = {
     dom.playbackStop.textContent = stop.count
       ? `${stop.p50} ms median`
       : 'no measurements yet';
+    if (dom.commitBadge) {
+      dom.commitBadge.textContent = `commit ${status.commit || 'unknown'}`;
+    }
     if (status.settings_error) {
       ui.error('Configuration error: ' + status.settings_error);
     } else if (llm.error) {

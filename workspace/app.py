@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
-from elvoice import settings
+from elvoice import settings, version
 from elvoice.engines import EngineError, EngineManager
 from elvoice.llm_client import LlmClient, fetch_status as fetch_llm_status
 from elvoice.pipeline import Metrics, VoiceSession
@@ -141,6 +141,7 @@ async def _status_payload() -> dict:
     session_state = active["session"].state if active is not None else "idle"
     payload = {
         "stage": "voice",
+        "commit": version.current_commit(),
         "settings_error": STATE.settings_error,
         "pipeline_ready": bool(
             manager is not None and manager.is_ready and llm_ready

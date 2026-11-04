@@ -478,6 +478,19 @@ ordinary Dota conversation need not search. The configured backend is `ddgs`; re
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
+## Deployed commit badge
+
+The page shows the running commit in the bottom-left corner. The voice container does not
+mount the repository `.git`, so the value is resolved from `EL_VOICE_COMMIT`, then
+`/data/COMMIT`, then `workspace/COMMIT`, then `git rev-parse` for local runs. Before starting
+Compose, record it once on the host:
+
+```sh
+sh tools/write_commit.sh   # writes data/COMMIT (ignored by Git)
+```
+
+Alternatively pass `EL_VOICE_COMMIT=<hash>` in the voice service environment.
+
 ## Interruption toggle
 
 The page has an **Interrupt with voice** checkbox, enabled by default. Leave it on for
@@ -583,7 +596,7 @@ The check exercises VAD → Whisper → the LLM-service boundary → Gemma → S
 a barge-in during playback, no stale audio after the flush, a follow-up turn, reconnect/turn
 ids, content-free status, and local-mode reporting. It does not persist audio or transcripts
 and prints only lengths and status. A
-successful run in the development sandbox prints `RESULT: PASS (23 checks)`.
+successful run in the development sandbox prints `RESULT: PASS (24 checks)`.
 
 ## Measured baseline in the development sandbox
 
@@ -598,7 +611,7 @@ rough baseline only; the acceptance run must measure the real deployment.
 | Local Gemma first token after STT | ~0.9 s |
 | Speech end → first audio dispatch (`response_ms`) | p50 3.7 s, p95 11.3 s (4 turns, shared CPU) |
 | Barge-in onset → flush dispatch | 0.9 ms median (1 measured interruption) |
-| End-to-end local self-test | `RESULT: PASS (23 checks)` |
+| End-to-end local self-test | `RESULT: PASS (24 checks)` |
 | Live DuckDuckGo search (`ddgs`) from the sandbox | 3 results in 4.8 s; one later run took 17.4 s during transient throttling |
 
 Remote provider latency, remote streaming and remote first-audio timing are **unmeasured**:

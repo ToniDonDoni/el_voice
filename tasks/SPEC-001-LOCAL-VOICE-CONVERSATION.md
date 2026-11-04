@@ -81,7 +81,7 @@ what has been observed and what still requires the real container and browser.
 - [x] Implement per-session/per-turn orchestration with Gemma streaming, overlapping Silero `b_lez` synthesis/playback, `turn_id` validation, and effective cancellation. See `workspace/elvoice/pipeline.py`; cancellation bounds are documented in the README.
 - [ ] Implement the headphone-supported echo policy and verify the assistant does not trigger its own barge-in. Policy and UI notice are implemented; real-browser verification remains in the acceptance criteria.
 - [ ] Measure p50/p95 response and interruption latency on the target Mac, then propose targets from the measured baseline. Development-sandbox baseline only; target measurements pending.
-- [ ] Verify every P0/P1 criterion in the actual container and browser; record scenarios, commands, measurements, and known limitations. Development-sandbox end-to-end self-test passes (`RESULT: PASS (23 checks)`); browser acceptance pending.
+- [ ] Verify every P0/P1 criterion in the actual container and browser; record scenarios, commands, measurements, and known limitations. Development-sandbox end-to-end self-test passes (`RESULT: PASS (24 checks)`); browser acceptance pending.
 
 Implementation evidence: [`README.md`](../README.md) and `workspace/tests/selftest.py`.
 

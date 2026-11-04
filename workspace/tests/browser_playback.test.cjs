@@ -324,9 +324,8 @@ async function run() {
     const { api } = harness();
     const turn = "00112233445566778899aabbccddeeff";
     const article = new Element();
-    article.querySelector = name => name === ".source-list"
-      ? article.children.find(child => child.className === "source-list") || null
-      : null;
+    article.querySelector = name => article.children.find(
+      child => "." + child.className === name) || null;
     article.append = section => {
       section.remove = () => { article.children = article.children.filter(item => item !== section); };
       article.children.push(section);
@@ -340,6 +339,18 @@ async function run() {
     const links = section.children[1].children.map(item => item.children[0].href);
     assert.deepEqual(links, [first.url, second.url],
       "both search rounds must remain visible after the cumulative source update");
+    await api.handleServerMessage(JSON.stringify({
+      type: "sources", turn_id: turn, tool_call_id: "call-failed",
+      status: "error", error_code: "search_unavailable",
+      sources: [first, second],
+    }));
+    const afterFailure = article.querySelector(".source-list");
+    const retainedLinks = afterFailure.children[1].children.map(
+      item => item.children[0].href);
+    assert.deepEqual(retainedLinks, [first.url, second.url],
+      "a failed follow-up search must not clear previously verified sources");
+    assert.match(article.querySelector(".message-status").textContent,
+      /One search failed; using earlier sources/);
   });
 
   await check("visible mute and volume controls change the playback gain", async () => {

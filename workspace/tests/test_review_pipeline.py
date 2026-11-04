@@ -211,7 +211,7 @@ class LogPrivacyTests(unittest.TestCase):
                 yield "reply marker."
 
             def synthesize(self, _text):
-                return b"LOCAL_AUDIO_SECRET_SENTINEL", 24000
+                return b"LOCAL_AUDIO_SECRET_SENTINEL!", 24000
 
         class BrokenRuntime(Runtime):
             def transcribe(self, _audio):
@@ -444,9 +444,12 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                             "the replacement turn must complete after residual inference exits")
         finally:
             release_first.set()
-            for task in (obsolete_task, locals().get("replacement_task")):
-                if task and not task.done():
-                    task.cancel()
+            pending = [task for task in (obsolete_task, locals().get("replacement_task"))
+                       if task and not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             app.runtime = original_runtime
 
     async def test_obsolete_llm_and_tts_workers_do_not_accumulate(self):
@@ -525,6 +528,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                     for task in (old_task, new_task):
                         if task and not task.done():
                             task.cancel()
+                    await asyncio.gather(old_task, *( [new_task] if new_task else []), return_exceptions=True)
                     app.runtime = original_runtime
 
 
@@ -717,6 +721,124 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             app.runtime = original_runtime
             app.active_session = original_active_session
             app.boot_task = original_boot_task
+
+
+class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_server_waits_for_browser_audio_capacity_acknowledgement(self):
+        import uvicorn
+        import websockets
+
+        class VAD:
+            def __init__(self):
+                self.frame = 0
+
+            def accept(self, _samples):
+                self.frame += 1
+                if self.frame == 1:
+                    return "start", None, 0.99
+                if self.frame == 2:
+                    return "end", np.zeros(16000, dtype=np.float32), 0.01
+                return None, None, 0.01
+
+        class Runtime:
+            def __init__(self):
+                self.status = {"ready": True, "stage": "ready"}
+                self.metrics = []
+                self.config = {"audio": {"max_buffered_audio_ms": 2000}}
+
+            async def initialize(self):
+                pass
+
+            def status_snapshot(self):
+                return {"ready": True, "stage": "ready", "audio": self.config["audio"]}
+
+            def new_vad(self):
+                return VAD()
+
+            def transcribe(self, _audio):
+                return "question"
+
+            def llm_stream(self, _text, _cancel, _history):
+                for index in range(5):
+                    yield f"This is response sentence number {index}. "
+
+            def synthesize(self, _text):
+                return b"\x00\x00" * 24000, 24000
+
+        runtime = Runtime()
+        original_runtime, original_boot, original_active = app.runtime, app.boot_task, app.active_session
+        app.runtime, app.boot_task, app.active_session = runtime, None, None
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.setblocking(False)
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app.app, log_level="critical", lifespan="on"))
+        server_task = asyncio.create_task(server.serve(sockets=[listener]))
+        client = None
+
+        async def next_audio(timeout):
+            pending_audio_event = False
+
+            async def receive():
+                nonlocal pending_audio_event
+                while True:
+                    message = await client.recv()
+                    if isinstance(message, bytes):
+                        if message.startswith(b"ELVA") or pending_audio_event:
+                            return message
+                    else:
+                        event = json.loads(message)
+                        if event.get("type") == "audio_chunk":
+                            pending_audio_event = True
+
+            return await asyncio.wait_for(receive(), timeout=timeout)
+
+        try:
+            async with asyncio.timeout(3):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+            client = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
+            await client.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            while json.loads(await client.recv()).get("type") != "session_started":
+                pass
+            await client.send(b"\x00\x00" * 512)
+            await client.send(b"\x00\x00" * 512)
+            first = await next_audio(2)
+            second = await next_audio(2)
+            self.assertTrue(first and second, "two independently framed audio chunks should be delivered")
+            with self.assertRaises(asyncio.TimeoutError):
+                await next_audio(0.15)
+            turn_id = app.active_session.current_turn.turn_id
+            for _ in range(3):
+                await client.send(json.dumps({
+                    "type": "playback_queue", "turn_id": turn_id,
+                    "consumed_ms": 1000, "buffered_ms": 1000,
+                }))
+                await next_audio(1)
+        finally:
+            if client is not None:
+                try:
+                    await asyncio.wait_for(client.close(), timeout=0.5)
+                except Exception:
+                    pass
+            if app.active_session is not None:
+                app.active_session.stopped = True
+                for turn in app.active_session.turns.values():
+                    turn.cancel_event.set()
+                for task in tuple(app.active_session.tasks):
+                    task.cancel()
+            server.should_exit = True
+            try:
+                await asyncio.wait_for(server_task, timeout=3)
+            except Exception:
+                server_task.cancel()
+                try:
+                    await server_task
+                except asyncio.CancelledError:
+                    pass
+            app.runtime, app.boot_task, app.active_session = original_runtime, original_boot, original_active
 
 
 if __name__ == "__main__":

@@ -927,6 +927,9 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                 self.config = {"audio": {"max_buffered_audio_ms": 2000}, "speech": {}}
                 self.metrics = []
                 self.transcription_count = 0
+                self.synthesize_count = 0
+                self.first_delta_blocked = threading.Event()
+                self.release_first_delta = threading.Event()
 
             async def initialize(self):
                 pass
@@ -942,34 +945,54 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                 return f"question {self.transcription_count}"
 
             def llm_stream(self, text, _cancel, _history):
-                yield f"The complete answer to {text}."
+                if text == "question 1":
+                    yield "The first part is already audible."
+                    self.first_delta_blocked.set()
+                    self.release_first_delta.wait()
+                    yield "The rest of the answer continues after the noisy speech."
+                else:
+                    yield f"The complete answer to {text}."
 
             def synthesize(self, _text, cancel_event=None):
+                self.synthesize_count += 1
                 return b"\x01\x00" * 960, 24000
 
         async def receive_event(client, expected):
+            audio_packets = []
+
+            async def acknowledge_audio(message):
+                audio_packets.append(message)
+                turn_hex = message[4:20].hex()
+                sequence = int.from_bytes(message[20:24], "big")
+                await client.send(json.dumps({
+                    "type": "playback_started", "turn_id": turn_hex,
+                }))
+                await client.send(json.dumps({
+                    "type": "playback_queue", "turn_id": turn_hex,
+                    "sequence": sequence, "consumed_ms": 0, "buffered_ms": 40,
+                }))
+
             async with asyncio.timeout(3):
                 while True:
                     message = await client.recv()
                     if isinstance(message, bytes):
-                        turn_hex = message[4:20].hex()
-                        sequence = int.from_bytes(message[20:24], "big")
-                        await client.send(json.dumps({
-                            "type": "playback_started", "turn_id": turn_hex,
-                        }))
-                        await client.send(json.dumps({
-                            "type": "playback_queue", "turn_id": turn_hex,
-                            "sequence": sequence, "consumed_ms": 0, "buffered_ms": 40,
-                        }))
+                        await acknowledge_audio(message)
                         continue
                     event = json.loads(message)
+                    observed_events.append(event)
+                    if event.get("type") == "audio_chunk" and event.get("type") == expected:
+                        audio_message = await client.recv()
+                        if not isinstance(audio_message, bytes):
+                            raise AssertionError("audio_chunk event must be followed by an audio packet")
+                        await acknowledge_audio(audio_message)
                     if event.get("type") == expected or (
                         isinstance(expected, set) and event.get("type") in expected
                     ):
-                        return event
+                        return event, audio_packets
 
         for mode in ("local", "remote"):
             with self.subTest(mode=mode):
+                observed_events = []
                 runtime = Runtime(mode)
                 original_runtime, original_boot, original_active = app.runtime, app.boot_task, app.active_session
                 app.runtime, app.boot_task, app.active_session = runtime, None, None
@@ -991,34 +1014,48 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     await client.send(json.dumps({
                         "type": "start", "sample_rate": 16000, "interrupt_enabled": False,
                     }))
-                    started = await receive_event(client, "session_started")
+                    started, _ = await receive_event(client, "session_started")
 
-                    # Complete the first answer but keep simulated browser playback active.
+                    # Let the first response begin playing while its LLM stream remains open.
                     await client.send(b"\x00\x00" * 512)
                     await client.send(b"\x00\x00" * 512)
-                    first = await receive_event(client, "turn_complete")
+                    _, initial_audio = await receive_event(client, "audio_chunk")
+                    self.assertTrue(runtime.first_delta_blocked.wait(1),
+                                     "the assistant generation must remain in flight after first audio")
                     session = app.active_session
-                    original_turn = session.turns[first["turn_id"]]
+                    original_turn = session.current_turn
                     async with asyncio.timeout(1):
                         while not original_turn.playback_started:
                             await asyncio.sleep(0.005)
                     self.assertTrue(original_turn.playback_started)
 
-                    # With interruption disabled, a noisy/user utterance is ignored.
+                    # Change enabled -> disabled while the assistant is generating and playing.
+                    await client.send(json.dumps({"type": "interrupt_setting", "enabled": False}))
                     await client.send(b"\x00\x00" * 512)
-                    ignored = await receive_event(client, {"speech_ignored", "interrupt"})
+                    ignored, _ = await receive_event(client, {"speech_ignored", "interrupt"})
                     self.assertEqual(ignored["type"], "speech_ignored",
                                      "disabled interruption must not stop current playback")
+                    self.assertIn({"type": "interrupt_setting", "enabled": False}, observed_events,
+                                  "the active WebSocket must acknowledge the live enabled-to-disabled change")
                     await client.send(b"\x00\x00" * 512)
                     self.assertEqual(ignored["turn_id"], original_turn.turn_id)
                     self.assertIs(session.current_turn, original_turn)
                     self.assertFalse(original_turn.cancel_event.is_set())
                     self.assertEqual(runtime.transcription_count, 1,
                                      "ignored speech must not create a competing transcription")
-                    self.assertIs(started.get("interrupt_enabled"), False,
-                                  "session acknowledgement must expose the selected setting")
 
-                    # The original response reaches browser playback completion, then listening resumes.
+                    # Resume the same response: its tail must arrive, synthesize and complete.
+                    runtime.release_first_delta.set()
+                    _, remaining_audio = await receive_event(client, "turn_complete")
+                    self.assertGreaterEqual(runtime.synthesize_count, 2,
+                                            "speech after the noise must still reach audio synthesis")
+                    self.assertGreaterEqual(len(initial_audio) + len(remaining_audio), 2,
+                                            "the browser transport must receive audio before and after the noise")
+                    self.assertEqual(runtime.transcription_count, 1)
+                    self.assertIs(started.get("interrupt_enabled"), True,
+                                  "session start defaults to enabled when no preference is supplied")
+
+                    # Let the browser report actual end-of-playback before the next utterance.
                     await client.send(json.dumps({
                         "type": "playback_finished", "turn_id": original_turn.turn_id,
                     }))
@@ -1027,24 +1064,25 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     # A new utterance after the reply is accepted normally.
                     await client.send(b"\x00\x00" * 512)
                     await client.send(b"\x00\x00" * 512)
-                    second = await receive_event(client, "turn_complete")
+                    second, _ = await receive_event(client, "turn_complete")
                     self.assertNotEqual(second["turn_id"], original_turn.turn_id)
                     self.assertEqual(runtime.transcription_count, 2)
 
                     # Turn barge-in back on while playback is active and prove replacement.
                     await client.send(json.dumps({"type": "interrupt_setting", "enabled": True}))
-                    setting = await receive_event(client, "interrupt_setting")
+                    setting, _ = await receive_event(client, "interrupt_setting")
                     self.assertIs(setting.get("enabled"), True)
                     previous_turn = app.active_session.turns[second["turn_id"]]
                     await client.send(b"\x00\x00" * 512)
-                    interruption = await receive_event(client, "interrupt")
+                    interruption, _ = await receive_event(client, "interrupt")
                     self.assertEqual(interruption["turn_id"], previous_turn.turn_id)
                     self.assertTrue(previous_turn.cancel_event.is_set())
                     await client.send(b"\x00\x00" * 512)
-                    replacement = await receive_event(client, "turn_complete")
+                    replacement, _ = await receive_event(client, "turn_complete")
                     self.assertNotEqual(replacement["turn_id"], previous_turn.turn_id)
                     self.assertEqual(runtime.transcription_count, 3)
                 finally:
+                    runtime.release_first_delta.set()
                     if client is not None:
                         try:
                             await asyncio.wait_for(client.close(), timeout=0.5)

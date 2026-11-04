@@ -1,14 +1,29 @@
 # EL Voice
 
-An independent local voice assistant for Docker Desktop on Apple Silicon. A browser on the
-Mac captures the microphone; everything else — speech-onset detection, final transcription,
-Dota-focused answer generation and speech synthesis — runs inside the Linux ARM64 container
-on CPU. No cloud inference, API keys or runtime downloads are used.
+An independent voice assistant for Docker Desktop on Apple Silicon with two explicit launch
+modes:
 
-The conversation pipeline is implemented in `workspace/`. The acceptance criteria in
-[`tasks/SPEC-001-LOCAL-VOICE-CONVERSATION.md`](tasks/SPEC-001-LOCAL-VOICE-CONVERSATION.md)
-still require a run in the real container with a real browser and microphone; the
-"Verification status" section below records exactly what has and has not been observed.
+- **Local Voice** — fully offline. A browser on the Mac captures the microphone; streaming
+  VAD, Whisper transcription and Silero `b_lez` synthesis run in the voice container, and
+  Gemma runs in a separate internal LLM service. No cloud inference, API keys or runtime
+  downloads are used.
+- **Remote Voice** — the same local audio capture, STT and TTS, but generation goes through
+  LangChain to the configured OpenCode Go model (`deepseek-v4.1-flash` by default) and a
+  real DuckDuckGo `web_search` tool. Only final text, bounded conversation context and
+  search queries leave the Mac; microphone audio never does.
+
+Both modes call the same internal LLM service over one streaming/cancellation contract, so
+the voice application never loads Gemma and never contacts OpenCode Go directly. The
+specification is [`tasks/SPEC-002-REMOTE-VOICE-LLM-SERVICE.md`](tasks/SPEC-002-REMOTE-VOICE-LLM-SERVICE.md);
+the criterion-by-criterion evidence is in
+[`tasks/SPEC-002-REMOTE-VOICE-LLM-SERVICE-IMPLEMENTATION-REPORT.md`](tasks/SPEC-002-REMOTE-VOICE-LLM-SERVICE-IMPLEMENTATION-REPORT.md).
+
+The acceptance criteria in both specifications still require a run in the real container
+with a real browser and microphone; live Remote Voice also requires the user's OpenCode Go
+key. This development environment has no Docker daemon, browser, microphone or provider
+key, so the "Verification status" section records exactly what has and has not been
+observed. Live DuckDuckGo search and the deterministic service/agent contracts were
+exercised here; the live provider and browser were not.
 
 No source code, installer, infrastructure package, binary build, or model mirror from the
 previously reviewed assistant author is used here.
@@ -21,16 +36,20 @@ previously reviewed assistant author is used here.
 | FFmpeg, OpenMP, libsndfile, curl, CA certificates | Debian repositories; audio decoding and CPU inference |
 | FastAPI, Uvicorn, WebSockets | Browser/API layer and WebSocket audio transport |
 | Faster-Whisper, CTranslate2, PyAV, ONNX Runtime | Local speech recognition, streaming VAD and audio processing |
-| llama-cpp-python | Official upstream Linux ARM64 CPU wheel pinned by SHA-256 |
+| llama-cpp-python | Official upstream Linux ARM64 CPU wheel pinned by SHA-256; local LLM service only |
 | PyTorch CPU | Official PyTorch Linux ARM64 wheel; no CUDA dependencies |
+| LangChain Core, LangChain OpenAI, OpenAI SDK | Remote LangChain agent and OpenCode Go client |
+| `ddgs` | DuckDuckGo search backend for the typed `web_search` tool |
 | NumPy, Hugging Face Hub and resolved dependencies | Supporting libraries |
 
 Direct inputs are in `requirements.in`. Python runtime dependencies and artifact hashes are
-resolved in `requirements.lock` for CPython 3.12 / Linux ARM64. The voice pipeline does not
-add a Python package: streaming VAD uses the already-locked ONNX Runtime and a publisher
-ONNX model file, so the existing image can run the browser application without a rebuild.
-Debian packages are not a complete snapshot, so this is not a byte-reproducible image.
-Changing the lock requires `uv` on the development machine and `sh tools/lock.sh`.
+resolved in `requirements.lock` for CPython 3.12 / Linux ARM64. SPEC-002 adds direct pins
+for `langchain-core==1.7.4`, `langchain-openai==1.7.3`, `openai==3.45.0` and `ddgs==9.16.1`;
+the lock was regenerated with `sh tools/lock.sh` (uv 0.11.14). **These new packages require
+one image rebuild** (`docker compose ... build voice`); after that, mounted `workspace/`,
+`llm_service/` and proxy source edits only need a restart. Debian packages are not a complete
+snapshot, so this is not a byte-reproducible image. Changing the lock requires `uv` on the
+development machine and `sh tools/lock.sh`.
 
 There is no host audio-device mount, GUI toolkit, Vosk requirement, CUDA toolkit, or Git
 checkout of someone else's application.
@@ -50,30 +69,101 @@ An existing `.env` is preserved. Set `EL_VOICE_PORT` there to change the host po
 
 | Host folder | Container folder | Access |
 | --- | --- | --- |
-| `workspace/` | `/workspace` | Read-only to the process; edit source on the Mac |
-| `models/` | `/models` | Read-only in the voice service; writable in the download service |
+| `workspace/` | `/workspace` | Read-only application source; edit on the Mac |
+| `llm_service/` | `/opt/llm-service/llm_service` | Read-only internal LLM service source; edit on the Mac |
+| `models/` | `/models` | Read-only in voice and local LLM; writable in the download service |
 | `data/` | `/data` | Writable cache and future optional application state |
 
-The repository root, Git metadata, home directory and Docker socket are not mounted.
-Only the Dockerfile and the small bootstrap tools enter the build context. Models do not
-inflate image layers and survive container recreation.
+`models/` is not mounted into the remote LLM service. The repository root, Git metadata,
+home directory, Docker socket and `.env` are not mounted. Only the Dockerfile, `llm_service/`
+and the small bootstrap tools enter the image build context. Models do not inflate image
+layers and survive container recreation.
 
 ## Build and start
 
-Give Docker Desktop approximately 12 GB memory and at least 15 GB free disk space.
-The runtime service is limited to 10 GB and 6 CPUs. The first image build downloads the
-Python dependencies; it no longer compiles llama.cpp. No AMD64 emulation or GPU access is used.
+Give Docker Desktop approximately 12 GB memory and at least 15 GB free disk space. The
+voice runtime service is limited to 10 GB and 6 CPUs. The local LLM service is limited to
+8 GB; the remote LLM service needs much less. The first image build downloads the Python
+dependencies; it no longer compiles llama.cpp. No AMD64 emulation or GPU access is used.
 Nginx runs from a separate official unprivileged image; Compose pulls it on first start, so
 adding the proxy does not rebuild `el-voice:dev`.
 
+Run commands from the repository root. `compose.yaml` is the shared base; the mode files
+add the internal `llm` service and point the voice service at it.
+
+### Local Voice (offline, no keys)
+
 ```sh
-docker compose build voice
-docker compose up -d voice proxy
-docker compose ps
+sh tools/init.sh
+docker compose config --quiet
+docker compose -f compose.yaml -f compose.local.yaml build voice
+docker compose -f compose.yaml -f compose.local.yaml up -d
+docker compose -f compose.yaml -f compose.local.yaml ps
 curl --fail http://localhost:8765/healthz
+curl --fail http://localhost:8765/api/status
 ```
 
-Open **http://localhost:8765** in a browser and press **Start conversation**.
+Local Voice mounts `workspace/`, `llm_service/` and `models/` into the private `llm`
+service. Gemma loads there rather than in the voice container. The `private` network is
+internal: neither the voice service nor the local LLM service has an outbound route.
+
+### Remote Voice (OpenCode Go + DuckDuckGo)
+
+Put the key only in the local, Git-ignored `.env` (never in Compose YAML or a commit):
+
+```sh
+cat >> .env <<'EOF'
+OPENCODE_GO_API_KEY=
+OPENCODE_GO_BASE_URL=https://opencode.ai/zen/go/v1
+OPENCODE_GO_MODEL=deepseek-v4.1-flash
+EOF
+# Edit .env and fill the key, then:
+docker compose -f compose.yaml -f compose.remote.yaml build voice
+docker compose -f compose.yaml -f compose.remote.yaml up -d
+docker compose -f compose.yaml -f compose.remote.yaml ps
+curl --fail http://localhost:8765/healthz
+curl --fail http://localhost:8765/api/status
+```
+
+Remote Voice does not mount `models/` into the LLM service and does not load Gemma. The
+`llm` service joins `private` (to answer the voice service) and `provider` (outbound HTTPS
+only); the voice, proxy and browser containers never receive `OPENCODE_GO_API_KEY`.
+`OPENCODE_GO_BASE_URL` defaults to the requested `https://opencode.ai/zen/go/v1`. The
+provider documentation also lists `https://opencode.ai/inference/go/openai/v1`; neither
+endpoint has been verified with a real account here. Override the variable rather than
+silently changing code. OpenCode Go also asks agent clients to send a stable
+`x-opencode-session` header; the service sends one per process and allows
+`OPENCODE_GO_SESSION_ID` to override it. This header requirement was confirmed against the
+unauthenticated endpoint and provider documentation, not by a successful live completion.
+
+`/api/status` reports `llm.mode` and readiness. A missing key leaves the service unready
+with an actionable, redacted error and disables the Start button; there is no fallback to
+Gemma or to another provider.
+
+### Switch modes and stop
+
+Always stop the previous graph before starting the other mode; the browser port is the same
+and the two graphs must not run concurrently.
+
+```sh
+# Local -> Remote
+docker compose -f compose.yaml -f compose.local.yaml down
+docker compose -f compose.yaml -f compose.remote.yaml up -d
+
+# Remote -> Local
+docker compose -f compose.yaml -f compose.remote.yaml down
+docker compose -f compose.yaml -f compose.local.yaml up -d
+
+# Stop the active mode (keeps models/ and data/)
+docker compose -f compose.yaml -f compose.local.yaml stop
+docker compose -f compose.yaml -f compose.local.yaml down
+# or the same commands with -f compose.remote.yaml
+```
+
+Open **http://localhost:8765** in a browser and press **Start conversation**. The page shows
+a **Local mode** or **Remote mode** badge. Remote mode also shows the disclosure that
+transcribed text and search queries leave the Mac. `/api/status` returns
+`pipeline_ready: true` only when the local speech models and the LLM service are both ready.
 
 Microphone capture is resampled to exactly 16 kHz inside the AudioWorklet with a
 two-stage 4 kHz low-pass filter and fractional linear interpolation
@@ -82,17 +172,16 @@ two-stage 4 kHz low-pass filter and fractional linear interpolation
 `workspace/tests/resampler.test.mjs` and `capture-worklet.test.mjs`.
 
 The only published mapping is `127.0.0.1:8765 -> proxy:8080`; Nginx forwards HTTP and
-WebSocket requests to `voice:8000` over the internal network. The voice service has no
-published port and no normal outbound internet route. Nginx joins a separate bridge network
-for host port publishing; that bridge permits potential outbound access from the Nginx
-container. Nginx's fixed upstream config forwards requests only to `voice:8000`. The
-download service uses egress to fetch models, while `voice` remains isolated on its internal
-network.
+WebSocket requests to `voice:8000` over the internal network. The voice service, the LLM
+service and their ports are never published. Nginx joins a separate bridge network for host
+port publishing; that bridge permits potential outbound access from the Nginx container.
+Nginx's fixed upstream config forwards requests only to `voice:8000`. The download service
+uses egress to fetch models, while `voice` remains isolated on its internal network.
 
-Application source changes are visible immediately in `/workspace` and only need
-`docker compose restart voice`; they do not need an image rebuild. The exception is a change
-to the model manifest or to `tools/`: those files are baked into the image and need
-`docker compose build voice` (see "Models and downloads").
+Application source changes are visible immediately in `/workspace` (and in the LLM service's
+`/opt/llm-service/llm_service` mount) and only need a restart, not a rebuild. The exception
+is a change to the model manifest, `tools/`, `requirements.*` or the Dockerfile: those are
+baked into the image and need `docker compose ... build voice`.
 
 ## Models and downloaded assets
 
@@ -178,6 +267,10 @@ taking. `pre_roll_ms` is included in the audio sent to Whisper.
 
 ## Architecture
 
+The voice container owns capture-facing audio work and the browser; the internal LLM
+service owns prompt construction, conversation history, generation and (in Remote mode)
+tool execution. Both modes use the same boundary.
+
 ```
 Browser (Mac)                                   Container (Linux ARM64, CPU)
 ─────────────                                   ────────────────────────────
@@ -186,46 +279,94 @@ getUserMedia (echoCancellation: true)
   ├─ AudioWorklet: 48 kHz → 16 kHz, 512-sample frames
   │        │ binary PCM over WebSocket (/ws) through Nginx :8765
   │        ▼
-  │   VoiceSession (asyncio) ──► SpeechSegmenter ──► Silero VAD ONNX (per frame)
-  │                                    │ onset: barge-in cancel of the active turn
-  │                                    │ end:   finalised utterance
-  │                                    ▼
-  │                              Whisper small (CTranslate2, CPU thread)
-  │                                    │ final Russian transcript
-  │                                    ▼
-  │                              Gemma 3 1B (llama-cpp-python, worker thread)
-  │                                    │ streamed text → SpeakableChunker
-  │                                    ▼
-  │                              Silero b_lez (PyTorch CPU, serial executor)
-  │                                    │ 24 kHz PCM chunks tagged with turn_id
-  │                                    ▼
+  │   voice service (private network, no provider key)
+  │     ├── SpeechSegmenter ──► Silero VAD ONNX (per frame)
+  │     │        │ onset: barge-in cancel of the active turn
+  │     │        │ end:   finalised utterance
+  │     ├── Whisper small (CTranslate2, CPU thread)
+  │     ├── Silero b_lez (PyTorch CPU, serial executor)
+  │     └── elvoice/llm_client.py
+  │              │ WebSocket /generate (internal only)
+  │              ▼
+  │   LLM service:8100 (no host port)
+  │     ├── server owns bounded ConversationHistory per connection
+  │     ├── LocalBackend: Gemma 3 1B GGUF (llama-cpp-python, worker thread)
+  │     └── RemoteBackend: LangChain ChatOpenAI → OpenCode Go
+  │              └── web_search tool → ddgs (bounded, typed query only)
+  │
   └─ Web Audio playback queue ◄──── binary audio frames over WebSocket
 ```
 
-Source layout (mounted at `/workspace`):
+Local mode uses only the `private` network. Remote mode adds the `provider` egress network
+to the LLM service only; the voice and browser path is unchanged, there is no Gemma mount
+and no local remote-model weights.
+
+Source layout (mounted at `/workspace`, server package at `/opt/llm-service`):
 
 | File | Responsibility |
 | --- | --- |
-| `app.py` | FastAPI app, WebSocket endpoint, status/health, static files |
-| `elvoice/settings.py` | settings load and cross-component validation |
-| `elvoice/models.py` | receipt/SHA-256 verification of publisher assets |
-| `elvoice/vad.py` | Silero ONNX streaming wrapper and endpointing segmenter |
-| `elvoice/engines.py` | model lifecycle, readiness, STT/LLM/TTS inference |
-| `elvoice/tts.py` | text sanitisation and speakable chunking |
-| `elvoice/pipeline.py` | per-session turn state machine, barge-in, metrics |
-| `static/` | browser UI, capture worklet, WebSocket client, playback queue |
-| `tests/selftest.py` | end-to-end pipeline check (synthetic speech, real models) |
+| `workspace/app.py` | FastAPI app, WebSocket endpoint, status/health, static files |
+| `workspace/elvoice/settings.py` | settings load/validation and internal LLM service URL |
+| `workspace/elvoice/models.py` | receipt/SHA-256 verification of publisher assets |
+| `workspace/elvoice/vad.py` | Silero ONNX streaming wrapper and endpointing segmenter |
+| `workspace/elvoice/engines.py` | VAD/STT/TTS lifecycle and inference (no LLM loading) |
+| `workspace/elvoice/tts.py` | text sanitisation and speakable chunking |
+| `workspace/elvoice/llm_client.py` | streaming/cancel WebSocket client for the LLM service |
+| `workspace/elvoice/pipeline.py` | per-session turn state machine, barge-in, metrics |
+| `llm_service/config.py` | mode/host/port/limits/provider env configuration |
+| `llm_service/server.py` | `/healthz`, `/status`, `/generate` and per-connection history |
+| `llm_service/backends/local.py` | Gemma streaming with per-token cancellation |
+| `llm_service/backends/remote.py` | bounded LangChain tool loop and redacted errors |
+| `llm_service/backends/search.py` | typed `web_search`, `ddgs`, URL/size bounds |
+| `workspace/static/` | browser UI, capture worklet, WebSocket client, playback queue |
+| `workspace/tests/selftest.py` | end-to-end local check with both services in-process |
+| `tests/test_llm_service.py` | real HTTP/WS service contract with a fake backend |
+| `tests/test_remote_backend.py` | deterministic remote agent/tool/failure checks |
+| `tests/test_search_live.py` | mocked URL/bounds checks plus optional live `ddgs` |
 
-Conversation context is bounded and kept in memory. `settings.json`
-`conversation.history_turns` (default 4) completed question/answer pairs are prepended to
-every prompt and trimmed to `conversation.max_prompt_chars`; whole pairs are dropped oldest
-first and the history is cleared when the session stops. `/api/status` exposes only the
-limits and the last prompt's pair/character counts, never transcript content.
+Conversation context is owned by the internal LLM service, per WebSocket connection, and kept
+in memory. `settings.json` `conversation.history_turns` (default 4) completed question/answer
+pairs are prepended to every prompt and trimmed to `conversation.max_prompt_chars`; whole
+pairs are dropped oldest first, cancelled turns are never added, and the history is cleared
+when the connection stops or the client sends `reset`. The voice pipeline sends only the
+current final utterance. `/api/status` exposes only the limits and the last prompt's
+pair/character counts, never transcript content.
 
 Models are loaded on a background thread so the HTTP process is alive immediately and can
 report readiness while several hundred megabytes of weights load. Loading order is
 PyTorch first, as documented in `tools/check_environment.py`, so its bundled OpenBLAS
 registers before other native inference libraries.
+
+## Internal LLM service contract
+
+The voice application opens one WebSocket to `EL_VOICE_LLM_URL` (default
+`ws://llm:8100/generate`) per browser session. One connection is one conversation and the
+service allows one active generation on it.
+
+Voice → LLM service:
+
+| Message | Meaning |
+| --- | --- |
+| `{"type":"generate","turn_id":N,"text":"..."}` | start a turn; only the current final utterance is sent |
+| `{"type":"cancel","turn_id":N}` | cancel that turn; the service sets its token, aborts the backend iterator and replies `cancelled` |
+| `{"type":"reset"}` | cancel any active generation and clear this connection's history |
+
+LLM service → voice:
+
+| Event | Meaning |
+| --- | --- |
+| `{"type":"start","turn_id":N,"prompt":{"history_turns":n,"chars":c}}` | prompt built; content-free statistics |
+| `{"type":"delta","turn_id":N,"text":"..."}` | final-answer text only; spoken by TTS |
+| `{"type":"tool","turn_id":N,"name":"web_search","query":"..."}` | a typed tool call is about to run |
+| `{"type":"sources","turn_id":N,"sources":[{"title","url","snippet"}]}` | bounded results for display only |
+| `{"type":"done","turn_id":N,"chars":c}` | answer complete and added to this connection's history |
+| `{"type":"error","turn_id":N,"code":"...","message":"...","retryable":bool}` | actionable, redacted failure; no fallback answer |
+| `{"type":"cancelled","turn_id":N}` | generation stopped; no answer is added to history |
+
+`/healthz` is process liveness. `/status` reports `mode`, `ready`, `error`, context limits,
+search settings, provider base URL/model (never the key), active sessions and content-free
+last-prompt statistics. Backend readiness means "configured/loaded"; for Remote mode it does
+not prove the account or endpoint works until a real turn succeeds.
 
 ## WebSocket protocol
 
@@ -251,7 +392,9 @@ Service → browser:
 | `{"type":"state","state":"listening"}` | `listening`, `processing`, `speaking`, `idle`, `reconnecting`, `error` |
 | `{"type":"user_speech_start","turn_id":N}` | VAD onset detected |
 | `{"type":"user_text","turn_id":N,"text":"..."}` | final local transcription (in-memory only) |
-| `{"type":"assistant_text","turn_id":N,"delta":"..."}` | streamed answer text (display only) |
+| `{"type":"assistant_text","turn_id":N,"delta":"..."}` | streamed answer text (display and TTS input) |
+| `{"type":"assistant_tool","turn_id":N,"name":"...","query":"..."}` | tool/search indicator; never spoken |
+| `{"type":"assistant_sources","turn_id":N,"sources":[...]}` | clickable source links; never spoken |
 | `{"type":"turn_end","turn_id":N}` | no more audio will be sent for this turn |
 | `{"type":"flush","turn_id":N,"reason":"barge_in"}` | stop and discard playback for turn `N` immediately |
 | `{"type":"empty_turn","turn_id":N}` | detection rejected as noise or no speech recognised |
@@ -286,9 +429,13 @@ assistant is generating or playing, does all of the following without a button:
 
 Cancellation is bounded, not merely an asyncio cancel:
 
-- **Language model:** generation runs in a dedicated worker thread and checks the cancel
-  token between tokens. A barge-in therefore stops CPU generation after at most one token;
-  no further tokens are scheduled. The cancelled turn's late text is dropped by `turn_id`.
+- **Language model:** the voice client sends `cancel(turn_id)` over the internal boundary.
+  The service stops its generation loop, aborts the backend iterator and replies `cancelled`.
+  In Local mode Gemma runs in a worker thread that checks the shared token between tokens, so
+  CPU generation stops after at most one token. In Remote mode cancelling the agent loop
+  closes the local HTTP stream and drops the turn; **provider-side cancellation is not
+  verified** (no live key here) and is not claimed. A cancelled turn is never added to
+  history.
 - **Speech synthesis:** synthesis is serialised in one executor and one phrase is in flight
   at a time. A barge-in stops scheduling new phrases; the in-flight phrase finishes, is
   bounded by the chunk limit (160 characters), and its audio is discarded by the `turn_id`
@@ -297,10 +444,32 @@ Cancellation is bounded, not merely an asyncio cancel:
 - **Browser:** queued audio is stopped and flushed immediately, and stale `turn_id` chunks
   are dropped on arrival.
 
-Measured in the development-sandbox self-test: barge-in onset → `flush` dispatch 0.3 ms
+Measured in the development-sandbox self-test: barge-in onset → `flush` dispatch 0.9 ms
 (median), no stale audio chunks observed after a flush. Only server-side dispatch is
 measured there; the audible stop latency on the target Mac is part of the browser acceptance
 run (the UI reports the browser-side stop time too).
+
+## Remote data disclosure and search
+
+Local mode keeps the original offline privacy boundary: no keys and no egress. Remote mode is
+an explicit, opt-in extension. When the badge says **Remote mode**, the page displays that:
+
+- final transcribed text and bounded conversation context are sent to the configured
+  OpenCode Go endpoint;
+- when the model calls `web_search`, the search query is sent to DuckDuckGo;
+- microphone audio is still processed locally and never sent to either service;
+- search results are untrusted data. The tool accepts only a short query, never a URL or
+  shell command, and the service does not fetch model-generated URLs. Results are bounded in
+  count, snippet size and execution time; private, loopback, link-local and metadata URLs are
+  removed before display;
+- only the LLM service container receives `OPENCODE_GO_API_KEY`, and only it joins the
+  `provider` egress network. The key is never returned by `/status`, written to logs or
+  included in errors; provider error detail is truncated and redacted.
+
+Search is invoked when the user asks for current facts or the model decides it needs them;
+ordinary Dota conversation need not search. The configured backend is `ddgs`; replacing it
+requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
+values rather than silently falling back.
 
 ## Echo and headphones
 
@@ -314,15 +483,22 @@ barge-in.
 
 ## Privacy
 
-- Audio and transcripts are kept in memory only for the duration of a session; the service
-  never writes them to `/data`, to the image or to logs.
+- Audio and transcripts are kept in memory only for the duration of a session; the voice and
+  LLM services never write them to `/data`, to the image or to logs.
+- Local mode: no API keys, no outbound inference, no search. This remains the offline
+  deliverable from SPEC-001.
+- Remote mode: only text/search leaves the Mac, as disclosed in the UI and above. There is
+  no persistent agent memory, database or external tracing. Provider keys live only in the
+  remote `llm` container's environment.
 - Application logs contain only operational data: model readiness, component failures
-  (exception type), turn numbers and millisecond timings. Transcripts, model output and
-  audio never appear. Uvicorn access logging is disabled.
+  (exception type), turn numbers and millisecond timings. Transcripts, model output, prompts,
+  search queries and audio never appear. Uvicorn access logging is disabled. The LLM service
+  logs error codes and exception types, not provider payloads.
 - `/healthz` returns only process liveness; `/api/status` returns readiness, settings and
-  content-free metrics.
-- The service stays on the internal Compose network; only the loopback-bound Nginx proxy is
-  published.
+  content-free metrics (including the LLM mode and context limits).
+- The voice service and the LLM service stay on the internal Compose network; only the
+  loopback-bound Nginx proxy is published. The remote LLM service additionally joins the
+  egress network; no other container does.
 
 ## Readiness, reconnects and errors
 
@@ -332,8 +508,12 @@ barge-in.
   clears the current turn and reconnects with backoff; the server cancels the active turn
   and releases the session, so old speech never continues across a reconnect.
 - `/api/status` reports `pipeline_ready` and the status of each component (`vad`, `stt`,
-  `llm`, `tts`), the active session state, and p50/p95 of the content-free timing metrics.
-  The page keeps the Start button disabled until the pipeline is ready.
+  `llm`, `tts`), the active session state, `llm.mode`/readiness and p50/p95 of the
+  content-free timing metrics. The page keeps the Start button disabled until both the local
+  speech models and the LLM service are ready.
+- If the LLM service is unreachable or unready (for example, a Remote mode key is missing),
+  the voice session start returns a retryable `llm_not_ready` error with the service's
+  redacted message. No local or alternate-provider answer is substituted.
 - Only one voice session is active at a time. A second browser gets a retryable `busy` error;
   a stale connection that is already closed is cleaned up and replaced.
 - The browser reconnects the WebSocket with backoff without reloading the page and restarts
@@ -344,25 +524,48 @@ barge-in.
 
 ## Run the checks
 
-Syntax and static checks (development machine):
+All checks are plain Python/node scripts (no `pytest` requirement). Run them from the
+repository root with the development venv and the downloaded models.
 
 ```sh
-python -m compileall -q workspace
+python -m compileall -q workspace llm_service tests
 node --check workspace/static/app.js
 node --check workspace/static/capture-worklet.js
+node --check workspace/static/playback.js
+node --check workspace/static/resampler.js
+
+EL_VOICE_MODELS=$PWD/models python workspace/tests/test_contracts.py
+EL_VOICE_MODELS=$PWD/models python workspace/tests/test_pipeline_context.py
+EL_VOICE_MODELS=$PWD/models python workspace/tests/test_vad_parity.py
+EL_VOICE_MODELS=$PWD/models python tools/test_tts_integrity.py
+
+EL_VOICE_MODELS=$PWD/models python tests/test_llm_service.py
+EL_VOICE_MODELS=$PWD/models python tests/test_remote_backend.py
+python tests/test_search_live.py            # mocked URL/bounds checks
+python tests/test_search_live.py --live     # optional outbound DuckDuckGo check
+
+for test in workspace/tests/*.test.mjs; do node "$test"; done
 ```
 
-End-to-end pipeline check inside the running container (synthesises its own Russian test
-utterances with the configured `b_lez` voice, then drives the real WebSocket protocol):
+The service contract test starts the real FastAPI app on a random loopback port with a
+deterministic fake backend; the remote test injects a LangChain-style fake chat model and a
+fake search function. Neither needs a provider key or network. The live search check is
+separate and skipped unless requested.
+
+End-to-end local pipeline check inside the running container. It starts the real internal
+LLM service (local Gemma backend) and the real voice app in one process, synthesises its own
+Russian test utterances with the configured `b_lez` voice, and drives both real WebSocket
+protocols:
 
 ```sh
-docker compose exec voice python /workspace/tests/selftest.py --models /models
+docker compose -f compose.yaml -f compose.local.yaml exec voice \
+  python /workspace/tests/selftest.py --models /models
 ```
 
-The check exercises one complete turn (VAD → Whisper → Gemma → Silero → tagged audio) and a
-barge-in during playback, verifies that no stale audio is emitted after the flush, reads the
-latency counters from `/api/status`, and confirms the process is still healthy. It writes no
-audio or transcripts. A successful run prints `RESULT: PASS (12 checks)`.
+The check exercises VAD → Whisper → the LLM-service boundary → Gemma → Silero → tagged audio,
+a barge-in during playback, no stale audio after the flush, a follow-up turn, reconnect/turn
+ids, content-free status, and local-mode reporting. It writes no audio or transcripts. A
+successful run in the development sandbox prints `RESULT: PASS (21 checks)`.
 
 ## Measured baseline in the development sandbox
 
@@ -373,15 +576,18 @@ rough baseline only; the acceptance run must measure the real deployment.
 | Measurement | Sandbox result |
 | --- | --- |
 | Streaming VAD CPU | 0.084 ms per 32 ms frame (~0.3 % of one core) |
-| Whisper small final transcription | 2.5 s / 4.6 s for 7.1 s / 2.4 s utterances |
-| LLM first audio (first sentence + first TTS phrase) | 2.1 s / 3.6 s |
-| Speech end → first audio dispatch (`response_ms`) | p50 8.0 s, p95 10.1 s (2 turns, shared CPU) |
-| Barge-in onset → flush dispatch | 0.3 ms median |
-| End-to-end self-test | `RESULT: PASS (12 checks)` |
+| Whisper small final transcription | 1.8–3.3 s for 4.2–4.4 s utterances in the two-service run |
+| Local Gemma first token after STT | ~0.9 s |
+| Speech end → first audio dispatch (`response_ms`) | p50 3.7 s, p95 11.3 s (4 turns, shared CPU) |
+| Barge-in onset → flush dispatch | 0.9 ms median (1 measured interruption) |
+| End-to-end local self-test | `RESULT: PASS (21 checks)` |
+| Live DuckDuckGo search (`ddgs`) from the sandbox | 3 results in 4.8 s; one later run took 17.4 s during transient throttling |
 
-Do not turn these into acceptance targets. After the browser run, `/api/status` reports p50
-and p95 for speech-end → first audible audio and for barge-in dispatch; agree targets from
-that baseline, as required by SPEC-001.
+Remote provider latency, remote streaming and remote first-audio timing are **unmeasured**:
+there is no OpenCode Go key in this environment. Do not turn these numbers into acceptance
+targets. After the browser run, `/api/status` reports p50 and p95 for speech-end → first
+audible audio and for barge-in dispatch; agree targets from that baseline, as required by
+SPEC-001.
 
 ## Known limitations
 
@@ -389,34 +595,71 @@ that baseline, as required by SPEC-001.
   required.
 - Cancellation bounds rather than pre-empts a single in-flight TTS phrase (at most the
   current speakable chunk, limited to 160 characters), because PyTorch CPU synthesis cannot
-  be interrupted mid-call. The language model stops within one token.
-- One active session at a time; no conversation history or persistent state. Each turn sends
-  one final utterance to the model.
+  be interrupted mid-call. Local Gemma stops within one token; remote provider-side
+  cancellation is unverified.
+- One active voice session at a time. Conversation history is bounded per LLM-service
+  connection and is not persisted across sessions.
+- **Live Remote Voice is unverified.** No OpenCode Go key exists in this environment, so the
+  configured endpoint, model access, streaming, tool calling and account-specific privacy
+  settings have not been exercised. Mocked checks do not complete live acceptance.
+- The provider documentation lists `https://opencode.ai/inference/go/openai/v1` while the
+  requested default is `https://opencode.ai/zen/go/v1`. Both are configurable; neither was
+  verified with a real completion. OpenCode Go also requires/asks for an
+  `x-opencode-session` header on agent traffic; the service sends one and exposes
+  `OPENCODE_GO_SESSION_ID` for a stable override.
+- Live DuckDuckGo search works from this sandbox, but search availability/rate limits from
+  the target Mac/container network are not guaranteed. The service reports search failure
+  and empty results honestly instead of fabricating an answer.
+- Remote search result quality and the model's decision to search are not tuned against the
+  live model; only deterministic fakes cover the tool loop.
+- Browser acceptance (mode badge, clickable sources, remote disclosure, barge-in, latency)
+  has not been run: this environment has no browser or microphone. Docker Compose
+  configuration was validated statically; the Docker daemon and image build were unavailable.
 - Silero v4 Cyrillic does not place stress automatically and Russian pronunciation needs
   listening tests; Whisper small is used for accuracy/latency balance.
-- The image built before this change contains the older `models.json` and download tools;
-  rebuilding is only needed to download the VAD asset again, not to run the application.
 
 ## Verification status
 
-Implemented and checked in development:
+Implemented and checked in development (SPEC-001 local regression):
 
 - [x] Streaming Silero VAD selected, pinned, documented; CPU cost measured.
 - [x] Continuous browser capture, WebSocket protocol, start/stop and reconnect handling.
 - [x] VAD onset/endpointing with pre-roll, noise rejection, final Whisper transcription.
-- [x] Local Gemma streaming with incremental Silero `b_lez` synthesis/playback.
+- [x] Local Gemma streaming through the internal LLM service with incremental Silero `b_lez`
+  synthesis/playback.
 - [x] `turn_id` isolation, barge-in flush, bounded cancellation, stale-result rejection.
 - [x] Echo policy, header/security hardening, readiness, content-free metrics.
-- [x] End-to-end self-test passes in a development sandbox; HTTP smoke test passes.
+- [x] End-to-end local self-test passes in a development sandbox with both services;
+  HTTP smoke test passes.
 
-Not yet observed (requires the real container and a browser on the Mac, as SPEC-001 requires):
+Implemented and checked in development (SPEC-002):
+
+- [x] Separate internal LLM service with local and remote backends and one event contract.
+- [x] Voice app no longer loads Gemma or contacts OpenCode Go; it sends current text only.
+- [x] Server-owned bounded context, session isolation, reset, cancellation and error recovery
+  proved at the real HTTP/WebSocket boundary with deterministic backends.
+- [x] Remote LangChain tool loop, typed `web_search`, `ToolMessage` pairing, source events,
+  iteration/result/snippet/time bounds and redacted actionable failures proved with
+  deterministic fakes.
+- [x] Live DuckDuckGo search returns bounded public results from the sandbox.
+- [x] `compose.local.yaml` and `compose.remote.yaml` validate; local has no egress, remote
+  gives only the LLM service provider egress and the key.
+- [x] New dependencies pinned and `requirements.lock` regenerated; image rebuild documented.
+- [x] Local mode reports `llm.mode=local`, readiness through `/api/status`, and search
+  disabled; remote mode without a key reports an actionable error and no fallback.
+
+Not yet observed (requires the real container, a browser and/or a provider key):
 
 - [ ] Complete conversation through `http://localhost:8765` with a real microphone.
+- [ ] Mode badge, remote disclosure and clickable sources rendered in the browser.
 - [ ] Barge-in observed in the browser during generation and during playback.
 - [ ] No false self-interruption with headphones.
 - [ ] p50/p95 latency measured on the target Mac; targets agreed from that baseline.
 - [ ] Disconnect/reconnect and stop/restart scenarios in the browser.
 - [ ] Storage and log inspection after a session proving no audio/transcript persistence.
+- [ ] Live OpenCode Go streaming/tool calling with the user's key, correct endpoint/model,
+  and measured remote latency.
+- [ ] Docker image build/run and both Compose graphs on the target Mac.
 
 ## Publisher references
 
@@ -439,21 +682,30 @@ See [`references/REFERENCES.md`](references/REFERENCES.md) for the article link.
 
 ## Continue development in the running container
 
+Use the same `-f compose.yaml -f compose.<mode>.yaml` pair as the active mode:
+
 ```sh
-docker compose exec voice sh
-docker compose exec voice python /opt/el-voice/check_environment.py --skip-models
-docker compose logs --tail=100 voice
-docker compose restart voice
+docker compose -f compose.yaml -f compose.local.yaml exec voice sh
+docker compose -f compose.yaml -f compose.local.yaml exec voice \
+  python /opt/el-voice/check_environment.py --skip-models
+docker compose -f compose.yaml -f compose.local.yaml logs --tail=100 voice llm
+docker compose -f compose.yaml -f compose.local.yaml restart voice llm
 ```
 
-Edit `workspace/` on the Mac; changes appear immediately in `/workspace`. Python packages
-are installed in the image's virtual environment, not in the source mount.
+Edit `workspace/` or `llm_service/` on the Mac; changes appear immediately in `/workspace`
+and `/opt/llm-service/llm_service`. Python packages are installed in the image's virtual
+environment, not in the source mount, so dependency changes need a rebuild.
 
 ## Stop
 
 ```sh
-docker compose stop voice
-docker compose down
+# Active mode only (containers stay defined, files are preserved)
+docker compose -f compose.yaml -f compose.local.yaml stop
+docker compose -f compose.yaml -f compose.remote.yaml stop
+
+# Remove the active graph; keeps bind-mounted models/ and data/
+docker compose -f compose.yaml -f compose.local.yaml down
+docker compose -f compose.yaml -f compose.remote.yaml down
 ```
 
 These commands preserve the bind-mounted model and data files. Do not delete `models/`

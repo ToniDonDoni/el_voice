@@ -278,6 +278,7 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                        turn_id=turn_id, trace_id=trace_id,
                                        event_index=stream_event_index,
                                        event_type=event.get("type"),
+                                       tool_call_id=event.get("tool_call_id"),
                                        text_chars=len(event.get("text", ""))
                                        if isinstance(event.get("text"), str) else 0)
                         yield (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()

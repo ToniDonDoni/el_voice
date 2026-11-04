@@ -5,7 +5,9 @@
 !tools/
 !tools/check_environment.py
 !tools/download_models.py
+!llm_service/
 
 # Reference archives
 **/*.mht
 **/*.mhtml
+!llm_service/**

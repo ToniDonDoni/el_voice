@@ -8,3 +8,8 @@ llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download
 huggingface-hub==2.4.0
 # Official CPU-only wheel. The regular Linux PyPI build pulls CUDA dependencies.
 torch @ https://download-r2.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=75941d429aaf4450bcd364345d7677e2d54aad45b38fbfcb1c0552450a6e9c40
+# SPEC-002 remote provider, LangChain agent and DuckDuckGo search backend.
+langchain-core==1.7.4
+langchain-openai==1.7.3
+openai==3.45.0
+ddgs==9.16.1

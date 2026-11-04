@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /opt/venv /opt/venv
 COPY tools/check_environment.py tools/download_models.py models.json /opt/el-voice/
+# Internal LLM service. Compose also mounts ./llm_service over this copy so
+# routine edits need only a restart; the image copy keeps the service runnable
+# when the source mount is absent.
+COPY llm_service /opt/llm-service/llm_service
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

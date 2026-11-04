@@ -17,7 +17,8 @@ def main():
     # Load Torch first so its bundled OpenBLAS is registered before native inference
     # packages can load another library with the same SONAME.
     for name in ("torch", "fastapi", "uvicorn", "websockets", "numpy", "av",
-                 "ctranslate2", "faster_whisper", "llama_cpp", "huggingface_hub"):
+                 "ctranslate2", "faster_whisper", "llama_cpp", "huggingface_hub",
+                 "langchain_core", "langchain_openai", "openai", "ddgs"):
         try:
             module = importlib.import_module(name)
             print(f"OK {name}: {getattr(module, '__version__', 'imported')}")

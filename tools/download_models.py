@@ -8,7 +8,8 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
-ALLOWED_HOSTS = {"huggingface.co", "models.silero.ai"}
+# raw.githubusercontent.com serves the pinned Silero VAD ONNX release asset.
+ALLOWED_HOSTS = {"huggingface.co", "models.silero.ai", "raw.githubusercontent.com"}
 
 
 def get_manifest():

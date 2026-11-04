@@ -66,13 +66,17 @@ Implement and verify incrementally: choose and characterize the VAD and cancella
 
 ## 6. ToDo
 
-- [ ] **Specification approved for implementation.**
-- [ ] Confirm a streaming local VAD implementation and the actual CPU cancellation behavior of the selected STT, LLM, and TTS engines. Record any new pinned dependency, model source, integrity check, and rebuild requirement before adding it.
-- [ ] Implement the browser session UI, continuous microphone capture, audio constraints, reconnect behavior, and proxied WebSocket protocol.
-- [ ] Implement local VAD onset/endpointing with pre-roll, silence handling, and final Whisper transcription.
-- [ ] Implement per-session/per-turn orchestration with Gemma streaming, overlapping Silero `b_lez` synthesis/playback, `turn_id` validation, and effective cancellation.
-- [ ] Implement the headphone-supported echo policy and verify the assistant does not trigger its own barge-in.
-- [ ] Measure p50/p95 response and interruption latency on the target Mac, then propose targets from the measured baseline.
-- [ ] Verify every P0/P1 criterion in the actual container and browser; record scenarios, commands, measurements, and known limitations.
+Implementation is complete in `workspace/`; see the README section "Verification status" for
+what has been observed and what still requires the real container and browser.
 
-Implementation evidence and remaining gaps: [EL Voice verification](../README.md).
+- [ ] **Specification approved for implementation.**
+- [x] Confirm a streaming local VAD implementation and the actual CPU cancellation behavior of the selected STT, LLM, and TTS engines. Record any new pinned dependency, model source, integrity check, and rebuild requirement before adding it. Chosen: Silero VAD v5.1.2 streaming ONNX via the already-locked ONNX Runtime (no new Python package; model pinned by SHA-256 in `models.json`, MIT). Measured 0.084 ms per 32 ms frame and documented in the README.
+- [x] Implement the browser session UI, continuous microphone capture, audio constraints, reconnect behavior, and proxied WebSocket protocol. See `workspace/static/` and the protocol section of the README.
+- [x] Implement local VAD onset/endpointing with pre-roll, silence handling, and final Whisper transcription. See `workspace/elvoice/vad.py`, `workspace/elvoice/engines.py`.
+- [x] Implement per-session/per-turn orchestration with Gemma streaming, overlapping Silero `b_lez` synthesis/playback, `turn_id` validation, and effective cancellation. See `workspace/elvoice/pipeline.py`; cancellation bounds are documented in the README.
+- [ ] Implement the headphone-supported echo policy and verify the assistant does not trigger its own barge-in. Policy and UI notice are implemented; real-browser verification remains in the acceptance criteria.
+- [ ] Measure p50/p95 response and interruption latency on the target Mac, then propose targets from the measured baseline. Development-sandbox baseline only; target measurements pending.
+- [ ] Verify every P0/P1 criterion in the actual container and browser; record scenarios, commands, measurements, and known limitations. Development-sandbox end-to-end self-test passes (`RESULT: PASS (12 checks)`); browser acceptance pending.
+
+Implementation evidence: [`README.md`](../README.md) and `workspace/tests/selftest.py`.
+

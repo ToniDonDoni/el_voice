@@ -23,11 +23,15 @@
 
 ## Current milestone
 
-The current task is environment preparation only. The user will build and start the container.
-`workspace/app.py` is an explicit bootstrap status page, not a voice conversation implementation.
-After the user starts the image, implement and test browser microphone input, local STT,
-local LLM inference, audio responses, and interruption. Keep the installed dependencies in
-the image and edit mounted source files so routine application changes need no image rebuild.
+The browser voice conversation pipeline is implemented in `workspace/`: streaming Silero VAD,
+final Whisper transcription, local Gemma streaming, incremental Silero `b_lez` synthesis,
+per-turn `turn_id` isolation and automatic barge-in. The remaining milestone is verification
+in the real container and a Mac browser: microphone capture, one complete conversation,
+barge-in during generation and playback, no self-interruption with headphones, reconnect and
+stop/restart scenarios, privacy/log inspection, and p50/p95 latency measured on the target Mac.
+See the README "Verification status" section and `tasks/SPEC-001-LOCAL-VOICE-CONVERSATION.md`.
+Keep the installed dependencies in the image and edit mounted source files so routine
+application changes need no image rebuild.
 
 ## Container contract
 

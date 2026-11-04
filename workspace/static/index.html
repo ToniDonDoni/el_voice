@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EL Voice — local Dota assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">EL<span>·</span>VOICE</div>
+    <div class="tagline">Local Dota voice assistant · runs entirely on this Mac</div>
+    <div id="state-pill" class="pill idle">idle</div>
+  </header>
+
+  <main>
+    <section class="card controls">
+      <div class="row">
+        <button id="start" class="btn primary" type="button" disabled>Start conversation</button>
+        <button id="stop" class="btn" type="button" disabled>Stop</button>
+      </div>
+      <div class="meter" aria-hidden="true"><div id="level"></div></div>
+      <p class="notice">
+        <strong>Headphones required.</strong> The browser requests echo cancellation,
+        but it is best effort. Speaker playback is not supported in this MVP, because
+        the assistant could hear itself and interrupt.
+      </p>
+    </section>
+
+    <section class="card transcript-card">
+      <h2>Conversation <small>in memory only — nothing is saved</small></h2>
+      <div id="messages" class="messages">
+        <p class="hint">Press “Start conversation” and ask something about Dota in Russian.</p>
+      </div>
+    </section>
+
+    <section class="card status-card">
+      <h2>Local pipeline</h2>
+      <dl id="components" class="components"></dl>
+      <dl class="stats">
+        <div><dt>Echo cancellation</dt><dd id="echo">—</dd></div>
+        <div><dt>Response latency p50 / p95</dt><dd id="latency">—</dd></div>
+        <div><dt>Barge-in dispatch p50 / p95</dt><dd id="barge">—</dd></div>
+        <div><dt>Browser playback stop</dt><dd id="playback-stop">—</dd></div>
+      </dl>
+      <p id="error" class="error" hidden></p>
+      <p class="privacy">
+        Models load from the local model directory. Audio and transcripts are kept only in
+        memory for the duration of the session and are never written to disk or logs.
+      </p>
+    </section>
+  </main>
+
+  <footer>Health endpoint: <code>/healthz</code> · pipeline status: <code>/api/status</code></footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

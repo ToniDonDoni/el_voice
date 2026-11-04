@@ -1,8 +1,42 @@
 {
+  "audio": {
+    "input_sample_rate": 16000,
+    "output_sample_rate": 24000,
+    "vad_frame_samples": 512,
+    "pre_roll_ms": 480,
+    "max_utterance_ms": 20000
+  },
+  "vad": {
+    "model": "vad/silero_vad.onnx",
+    "threshold": 0.5,
+    "neg_threshold": 0.35,
+    "min_speech_ms": 250,
+    "end_silence_ms": 550
+  },
+  "stt": {
+    "model_dir": "stt/small",
+    "language": "ru",
+    "beam_size": 2,
+    "cpu_threads": 4
+  },
+  "llm": {
+    "model": "llm/gemma-3-1b-it-Q4_K_M.gguf",
+    "n_ctx": 4096,
+    "n_batch": 256,
+    "n_threads": 4,
+    "max_tokens": 200,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "repeat_penalty": 1.1,
+    "system_prompt": "Ты — голосовой помощник по Dota 2. Отвечай по-русски, кратко и по делу: одно-два предложения, без списков, markdown и эмодзи, потому что ответ озвучивается. Давай конкретные советы по героям, предметам, сборкам и тактике. Если вопрос не про Dota 2, коротко скажи, что помогаешь только с Dota 2."
+  },
   "tts": {
     "model": "tts/v4_cyrillic.pt",
     "speaker": "b_lez",
     "sample_rate": 24000,
-    "cpu_threads": 4
+    "cpu_threads": 4,
+    "min_chunk_chars": 12,
+    "soft_chunk_chars": 70,
+    "max_chunk_chars": 160
   }
 }

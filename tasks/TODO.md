@@ -1,1 +1,4 @@
 - [ ] [Implement local Dota voice conversation](SPEC-001-LOCAL-VOICE-CONVERSATION.md).
+  - [x] Implementation in `workspace/` (streaming VAD, Whisper, Gemma streaming, Silero `b_lez`, barge-in, reconnects).
+  - [x] Development-sandbox end-to-end self-test passes (12 checks).
+  - [ ] Real container + Mac browser acceptance (P0/P1): `docker compose restart voice`, open http://localhost:8765, then record latency and privacy evidence.

@@ -155,7 +155,7 @@ async def stream_agent(
                     if getattr(result, "type", None) != "tool" and type(result).__name__ != "ToolMessage":
                         continue
                     call_id = str(getattr(result, "tool_call_id", ""))
-                    name = str(getattr(result, "name", "web_search"))
+                    name = str(getattr(result, "name", None) or "web_search")
                     if name != "web_search":
                         raise RuntimeError("provider_tool_loop_failed")
                     sources = _sources(result, max_snippet_chars)

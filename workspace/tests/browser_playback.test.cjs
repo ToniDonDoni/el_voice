@@ -197,22 +197,28 @@ async function run() {
     await api.handleServerMessage(makePacket(turn, 0, 24000));
     const first = audio.sources.find(source => source.when !== undefined);
     assert.ok(first, "the first assistant audio source must start");
-    audio.finishNext();
-    assert.ok(first.ended, "the first source must reach its natural completion callback");
-
-    await api.handleServerMessage(JSON.stringify({ type: "speech_ignored", turn_id: turn }));
     await api.handleServerMessage(makePacket(turn, 1, 24000));
     const second = audio.sources.filter(source => source.when !== undefined)[1];
-    assert.ok(second, "the response tail must start after ignored speech");
-    assert.equal(second.stopped, undefined, "ignored speech must not stop the assistant's audio source");
-    audio.finishNext();
-    assert.ok(second.ended, "the response tail must reach its natural completion callback");
+    assert.ok(second, "the response tail must be queued before the ignored speech event");
+    await api.handleServerMessage(JSON.stringify({ type: "speech_ignored", turn_id: turn }));
+    assert.equal(first.stopped, undefined, "ignored speech must not stop current assistant audio");
+    assert.equal(second.stopped, undefined, "ignored speech must not stop queued assistant audio");
 
     await api.handleServerMessage(JSON.stringify({ type: "turn_complete", turn_id: turn }));
-    assert.ok(socket.sent.map(message => {
+    const hasPlaybackFinished = () => socket.sent.map(message => {
       try { return JSON.parse(message); } catch (_) { return null; }
-    }).some(message => message?.type === "playback_finished" && message.turn_id === turn),
-    "the browser must report playback completion after both sources finish");
+    }).some(message => message?.type === "playback_finished" && message.turn_id === turn);
+    assert.equal(hasPlaybackFinished(), false,
+      "the browser must wait for both queued sources to finish before acknowledging playback");
+
+    audio.finishNext();
+    assert.ok(first.ended, "the first source must reach its natural completion callback");
+    assert.equal(hasPlaybackFinished(), false,
+      "one completed source must not finish the turn while the response tail is playing");
+    audio.finishNext();
+    assert.ok(second.ended, "the response tail must reach its natural completion callback");
+    assert.equal(hasPlaybackFinished(), true,
+      "the browser must report playback completion after both sources finish");
   });
 
   await check("WebSocket closure immediately stops scheduled playback", async () => {

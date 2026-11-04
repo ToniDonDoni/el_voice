@@ -98,6 +98,8 @@ async def stream_agent(
     pending_text: list[str] = []
     tool_count = 0
     answer_emitted = False
+    all_sources: list[dict[str, str]] = []
+    known_urls: set[str] = set()
     request = agent.astream(
         {"messages": messages},
         config={"recursion_limit": 2 * max_tool_calls + 2},
@@ -138,7 +140,7 @@ async def stream_agent(
                         call_id = str(call.get("id") or "")
                         name = str(call.get("name") or "")
                         observe("agent_tool_call", tool_name=name, tool_call_id=call_id)
-                        yield {"type": "tool_call", "name": name, "result_count": 0}
+                        yield {"type": "tool_call", "name": name, "tool_call_id": call_id, "result_count": 0}
                     continue
                 # An update without a tool request confirms a final model answer.
                 chunks = pending_text or [_text(response)]
@@ -161,6 +163,13 @@ async def stream_agent(
                     sources = _sources(result, max_snippet_chars)
                     observe("agent_tool_result", tool_name=name, tool_call_id=call_id,
                             result_count=len(sources))
-                    yield {"type": "sources", "sources": sources}
+                    # The browser replaces its source list on every update.
+                    # Send the bounded deduplicated set accumulated for this turn.
+                    for source in sources:
+                        if source["url"] not in known_urls and len(all_sources) < 5:
+                            known_urls.add(source["url"])
+                            all_sources.append(source)
+                    yield {"type": "sources", "sources": list(all_sources),
+                           "tool_call_id": call_id}
     if not cancelled.is_set() and not answer_emitted:
         raise RuntimeError("empty_generation")

@@ -1,4 +1,4 @@
-# Review notes: SPEC-001 local Dota voice conversation
+# Review notes: SPEC-001 local Elden Ring voice conversation
 
 Status: **not started**. This file records follow-up work found while reviewing the
 implemented pipeline on branch `DeepSeek-Flash` (commits `b96ef16`, `18dbb23`, `1be543f`,
@@ -99,7 +99,7 @@ short, documented bound; reconnect starts from a clean playback state.
 
 ## Out of scope
 
-Persistent conversation history across sessions, speaker-playback acoustic support, Dota
+Persistent conversation history across sessions, speaker-playback acoustic support, Elden Ring
 game control, external APIs, and anything already declared out of scope in SPEC-001.
 
 ## Verification for the follow-ups

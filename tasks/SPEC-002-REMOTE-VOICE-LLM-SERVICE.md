@@ -39,7 +39,7 @@ browser acceptance checks have been completed.
   ordinary conversational turns need not search.
 - Remote mode uses a separate search-oriented system prompt: explicit "search" requests and
   current-fact questions must invoke the `web_search` tool before answering, and a
-  non-Dota question must not be refused when search can answer it. Local mode keeps the
+  non-Elden Ring question must not be refused when search can answer it. Local mode keeps the
   offline prompt without tool instructions.
 - Send a unique `x-opencode-session` value per conversation/session in every provider
   request, stable for all turns of that session and not shared between sessions; the

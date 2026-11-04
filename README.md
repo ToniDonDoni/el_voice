@@ -474,7 +474,7 @@ an explicit, opt-in extension. When the badge says **Remote mode**, the page dis
   included in errors; provider error detail is truncated and redacted.
 
 Search is invoked when the user asks for current facts or the model decides it needs them;
-ordinary Dota conversation need not search. The configured backend is `ddgs`; replacing it
+ordinary Elden Ring conversation need not search. The configured backend is `ddgs`; replacing it
 requires code and a new dependency pin. `EL_VOICE_SEARCH_PROVIDER` rejects unsupported
 values rather than silently falling back.
 
@@ -483,8 +483,8 @@ values rather than silently falling back.
 Remote mode uses a search-oriented system prompt (`llm.remote_system_prompt` in
 `settings.json`). When the user asks to search or asks for current facts (weather, news,
 the current patch, prices) the model must call `web_search` first, then answer from the
-sourced results; it no longer refuses a question just because it is not about Dota. Local
-mode keeps the offline Dota prompt and is never told about a search tool.
+sourced results; it no longer refuses a question just because it is not about Elden Ring. Local
+mode keeps the offline Elden Ring prompt and is never told about a search tool.
 
 ## Correlated diagnostic logs
 
@@ -493,7 +493,7 @@ Every answer is traced across both services by three ids: the WebSocket session
 like:
 
 ```text
-INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=tool_call name=web_search query=Dota 2 патч 7.41
+INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=tool_call name=web_search query=Elden Ring патч 7.41
 INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=search_done count=5 duration_ms=4510
 INFO llm_service.remote [session=2136…5a5d turn=7 req=9c6f327f] event=sources_emitted count=5 urls=…
 INFO llm_service.server [session=2136…5a5d turn=7 req=9c6f327f] event=generate_done chars=259 duration_ms=13657

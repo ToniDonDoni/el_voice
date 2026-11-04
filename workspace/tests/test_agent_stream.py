@@ -96,8 +96,13 @@ class AgentStreamContractTests(unittest.IsolatedAsyncioTestCase):
         ])
         self.assertEqual("".join(e["text"] for e in events if e["type"] == "delta"),
                          "Final answer")
-        self.assertEqual([e["sources"][0]["title"] for e in events if e["type"] == "sources"],
-                         ["First", "Second"])
+        source_events = [e for e in events if e["type"] == "sources"]
+        self.assertEqual([[item["title"] for item in e["sources"]] for e in source_events],
+                         [["First"], ["First", "Second"]])
+        self.assertEqual([e["tool_call_id"] for e in source_events],
+                         ["call-1", "call-2"])
+        self.assertEqual([e["tool_call_id"] for e in events if e["type"] == "tool_call"],
+                         ["call-1", "call-2"])
         self.assertEqual([v[1]["tool_call_id"] for v in observed if v[0] == "agent_tool_call"],
                          ["call-1", "call-2"])
         self.assertEqual(agent.config["recursion_limit"], 10)

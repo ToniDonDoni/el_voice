@@ -26,6 +26,10 @@ browser acceptance checks have been completed.
 - Keep browser capture/playback, streaming VAD, Whisper STT, and Silero `b_lez` TTS
   local. Remote mode sends text, bounded conversation context, and necessary tool
   results to external services. Raw microphone audio stays local.
+- Use the shared browser interrupt preference specified by
+  [SPEC-001](SPEC-001-LOCAL-VOICE-CONVERSATION.md) in both Local and Remote Voice.
+  It is on by default; when off, speech during an active response must not cancel
+  remote generation, search, or playback.
 - Give the remote LLM service outbound HTTPS access for inference and search. Keep
   the voice application on an internal network and publish only the existing
   loopback-bound Nginx browser endpoint. The LLM service has no host-published port.
@@ -100,6 +104,13 @@ provides a search API or that hosted search is built into this model.
   Distinguish local cancellation from any unverified provider-side cancellation.
   Disconnect, stop/restart, timeout, rate-limit, and provider failure recover without
   stuck sessions, duplicate answers, or unbounded retries and queues.
+- [ ] **Configurable interruption:** The shared checked-by-default browser control
+  interrupts Remote Voice when enabled. When disabled, speech during an active
+  reply does not cancel remote generation/search or stop playback, and does not
+  start a competing turn. The reply completes; a later utterance is accepted.
+  Toggling applies to the active session and survives WebSocket reconnects. Verify
+  both settings through the real voice WebSocket boundary with deterministic model
+  fakes; no live provider call is required for this control behavior.
 - [ ] **Local regression:** Local Voice still works with external access unavailable,
   preserves conversation context, VAD, and `b_lez`, and has no remote/search fallback.
   Continue recording any inherited SPEC-001 failures against that specification.
@@ -182,6 +193,7 @@ outcomes without modifying the original task or its acceptance criteria.
 - [x] Implement the remote LangChain agent, bounded context, and real search tool.
 - [x] Add Local Voice / Remote Voice Compose configurations and runtime secrets.
 - [x] Integrate voice streaming, cancellation, source display, and mode indication.
+- [ ] Add and test the shared default-on interrupt preference in both modes.
 - [x] Update README, scoped project guidance, locks, and reproducible checks.
 - [ ] Complete local and remote acceptance and publish the criterion-by-criterion
   implementation report with remaining limitations.

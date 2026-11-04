@@ -74,7 +74,11 @@ function harness() {
   const elements = new Map();
   const document = {
     querySelector(selector) {
-      if (!elements.has(selector)) elements.set(selector, new Element());
+      if (!elements.has(selector)) {
+        const element = new Element();
+        if (selector === "#interrupt-toggle") element.checked = true;
+        elements.set(selector, element);
+      }
       return elements.get(selector);
     },
     createElement() { return new Element(); },
@@ -252,6 +256,31 @@ async function run() {
     volume.value = "0.4";
     await volume.listeners.get("input")({ currentTarget: volume });
     assert.equal(audio.gains.at(-1).gain.value, 0.4);
+  });
+
+  await check("visible interrupt preference defaults on and updates the active socket", async () => {
+    const markup = html.match(/<input[^>]*id="interrupt-toggle"[^>]*>/)?.[0];
+    assert.ok(markup && /\btype="checkbox"/.test(markup) && /\bchecked\b/.test(markup),
+      "the interrupt checkbox must be visible and checked by default");
+    assert.match(html, /<label[^>]*for="interrupt-toggle"[^>]*>Interrupt assistant when I speak<\/label>/,
+      "the preference must have an accessible visible label");
+    const { api, elements } = harness();
+    await api.connectSocket();
+    const ws = FakeWebSocket.instances.at(-1);
+    const start = JSON.parse(ws.sent[0]);
+    assert.equal(start.interrupt_enabled, true,
+      "new sessions must send the default-on interrupt preference");
+    const toggle = elements.get("#interrupt-toggle");
+    assert.ok(toggle.listeners.has("change"), "the visible checkbox must have a change handler");
+    toggle.checked = false;
+    toggle.listeners.get("change")({ currentTarget: toggle });
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "interrupt_setting", enabled: false },
+      "turning interruption off must update the active socket");
+    toggle.checked = true;
+    toggle.listeners.get("change")({ currentTarget: toggle });
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "interrupt_setting", enabled: true },
+      "turning interruption on must update the active socket");
+    await api.stopSession(false);
   });
 
   await check("audio buffering diagnostics and browser error reporting are visible", async () => {

@@ -361,7 +361,7 @@ LLM service → voice:
 | Event | Meaning |
 | --- | --- |
 | `{"type":"start","turn_id":N,"prompt":{"history_turns":n,"chars":c}}` | prompt built; content-free statistics |
-| `{"type":"delta","turn_id":N,"text":"..."}` | final-answer text only; spoken by TTS |
+| `{"type":"delta","turn_id":N,"text":"..."}` | answer text only; spoken by TTS |
 | `{"type":"tool","turn_id":N,"name":"web_search","query":"..."}` | a typed tool call is about to run |
 | `{"type":"sources","turn_id":N,"sources":[{"title","url","snippet"}]}` | bounded results for display only |
 | `{"type":"done","turn_id":N,"chars":c}` | answer complete and added to this connection's history |
@@ -645,7 +645,10 @@ Implemented and checked in development (SPEC-002):
   proved at the real HTTP/WebSocket boundary with deterministic backends.
 - [x] Remote LangChain tool loop, typed `web_search`, `ToolMessage` pairing, source events,
   iteration/result/snippet/time bounds and redacted actionable failures proved with
-  deterministic fakes.
+  deterministic fakes. Tool arguments and control fields are never emitted as delta text; a
+  one-chunk lookahead is discarded when a tool call is detected. A provider that streams
+  prose in the same assistant message before its tool arguments could still surface that
+  prose, which live acceptance must check.
 - [x] Live DuckDuckGo search returns bounded public results from the sandbox.
 - [x] `compose.local.yaml` and `compose.remote.yaml` validate; local has no egress, remote
   gives only the LLM service provider egress and the key.

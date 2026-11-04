@@ -241,7 +241,7 @@ async def search_failure_scenario(config) -> None:
     model = FakeChatModel([[tool_chunk()], final_chunks()])
 
     async def failing_search(query: str, **kwargs):
-        raise RuntimeError("throttled for key sk-live-secret")
+        raise RuntimeError("throttled for key dummy-provider-secret")
 
     backend = RemoteBackend(config, chat_model=model, search=failing_search)
     await backend.start()
@@ -250,9 +250,9 @@ async def search_failure_scenario(config) -> None:
     check("search failure/timeout with no answer speaks the fallback line",
           spoken == "Я так качался.", repr(spoken))
     check("search failure does not leak a credential",
-          "sk-live-secret" not in json.dumps(events), "no credential in events")
+          "dummy-provider-secret" not in json.dumps(events), "no credential in events")
     check("search failure does not fabricate an answer",
-          "sk-live-secret" not in spoken and "throttled" not in spoken, spoken)
+          "dummy-provider-secret" not in spoken and "throttled" not in spoken, spoken)
 
 
 class ProviderError(Exception):
@@ -260,7 +260,7 @@ class ProviderError(Exception):
 
 
 async def provider_failure_scenario(config) -> None:
-    key = "sk-test-only-secret"
+    key = "dummy-test-secret"
     remote = dataclasses.replace(config.remote, api_key=key)
     keyed = dataclasses.replace(config, remote=remote)
     model = FakeChatModel([

@@ -45,7 +45,7 @@ requested endpoint or model.
 
 ## Commands and results
 
-All commands run from `/work/el_voice`.
+All commands run from the repository root.
 
 ### Static and regression checks
 

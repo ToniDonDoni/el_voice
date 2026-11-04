@@ -200,9 +200,11 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                         await queue.put(("event", {"type": "delta", "text": piece}))
                                 elif event_type == "sources":
                                     sources = event.get("sources", [])
-                                    await queue.put(("event", {"type": "sources", "sources": sources[:5]}))
+                                    await queue.put(("event", {"type": "sources", "sources": sources[:5],
+                                                               "tool_call_id": event.get("tool_call_id", "")}))
                                 elif event_type == "tool_call":
                                     await queue.put(("event", {"type": "tool_call", "name": "web_search",
+                                                                 "tool_call_id": event.get("tool_call_id", ""),
                                                                  "result_count": min(5, max(0, int(event.get("result_count", 0))))}))
                         if not cancelled.is_set() and reply_parts:
                             current.contexts.remember(state, request.text, "".join(reply_parts))

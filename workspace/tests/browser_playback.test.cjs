@@ -93,6 +93,8 @@ function harness() {
 window.__elVoiceTest = {
   setAudio(context, ws) { audioContext = context; socket = ws; },
   handleServerMessage,
+  addSources,
+  seedAssistantArticle(turnId, article) { messageNodes.set("assistant:" + turnId, { article }); },
   connectSocket,
   stopSession,
   reportClientError,
@@ -107,7 +109,7 @@ window.__elVoiceTest = {
     location: { protocol: "http:", host: "localhost" },
     fetch: async () => ({ json: async () => ({ ready: true, stage: "ready", models: {}, metrics: {},
       audio: { max_buffered_audio_ms: 2000 } }) }),
-    setInterval() {}, setTimeout, console, ArrayBuffer, Int16Array, Map, Set, Math, Promise,
+    setInterval() {}, setTimeout, console, URL, ArrayBuffer, Int16Array, Map, Set, Math, Promise,
   });
   return { api: window.__elVoiceTest, elements, window };
 }
@@ -316,6 +318,28 @@ async function run() {
     assert.equal(api.getAssistantText(turn), "old start", "stale old-session text must be ignored");
     assert.equal(audio.sources.filter(source => source.when !== undefined).length, 0,
       "stale old-session audio must not be scheduled after reconnect");
+  });
+
+  await check("cumulative search sources survive repeated browser updates", async () => {
+    const { api } = harness();
+    const turn = "00112233445566778899aabbccddeeff";
+    const article = new Element();
+    article.querySelector = name => name === ".source-list"
+      ? article.children.find(child => child.className === "source-list") || null
+      : null;
+    article.append = section => {
+      section.remove = () => { article.children = article.children.filter(item => item !== section); };
+      article.children.push(section);
+    };
+    api.seedAssistantArticle(turn, article);
+    const first = { url: "https://example.com/first", title: "First" };
+    const second = { url: "https://example.com/second", title: "Second" };
+    api.addSources(turn, [first]);
+    api.addSources(turn, [first, second]);
+    const section = article.querySelector(".source-list");
+    const links = section.children[1].children.map(item => item.children[0].href);
+    assert.deepEqual(links, [first.url, second.url],
+      "both search rounds must remain visible after the cumulative source update");
   });
 
   await check("visible mute and volume controls change the playback gain", async () => {

@@ -332,9 +332,13 @@ async function handleServerMessage(data) {
       break;
     case "sources":
       addSources(event.turn_id, event.sources);
-      addMessageStatus(event.turn_id, event.sources?.length
-        ? `Grounded with ${event.sources.length} web source${event.sources.length === 1 ? "" : "s"}`
-        : "Search returned no sources");
+      addMessageStatus(event.turn_id, event.status === "error"
+        ? (event.sources?.length
+          ? "One search failed; using earlier sources"
+          : "Search unavailable; answer may be unverified")
+        : event.sources?.length
+          ? `Grounded with ${event.sources.length} web source${event.sources.length === 1 ? "" : "s"}`
+          : "Search returned no sources");
       break;
     case "text_delta":
       appendAssistantText(event.turn_id, event.text);

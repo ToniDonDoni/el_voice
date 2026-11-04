@@ -1,8 +1,7 @@
 """Turn-scoped event adapter for LangChain's streaming agent graph.
 
-A model may stream prose before later choosing a tool. Buffer each model step
-until the graph confirms it is a final answer: speculative prose must never
-reach the voice synthesizer.
+Only speak after the agent commits to its final-answer phase. Tool failures
+must stay paired with their calls and must not erase previous search results.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator
 
-from .search import SearchFailure, public_https_url
+from .search import public_https_url
 
 
 SEARCH_FAILURE_CODES = (
@@ -58,21 +57,21 @@ def _error_code(text: str) -> str:
     return "search_unavailable"
 
 
-def _sources(tool_message: Any, max_snippet_chars: int) -> list[dict[str, str]]:
+def _sources(tool_message: Any, max_snippet_chars: int) -> tuple[list[dict[str, str]], str | None]:
     content = _text(tool_message)
     if getattr(tool_message, "status", None) == "error":
-        raise SearchFailure(_error_code(content))
+        return [], _error_code(content)
     try:
         payload = json.loads(content)
-    except (TypeError, ValueError) as exc:
-        raise SearchFailure(_error_code(content)) from exc
+    except (TypeError, ValueError):
+        return [], _error_code(content)
     if not isinstance(payload, dict):
-        raise SearchFailure("search_unavailable")
+        return [], "search_unavailable"
     if payload.get("error"):
-        raise SearchFailure(_error_code(str(payload["error"])))
+        return [], _error_code(str(payload["error"]))
     results = payload.get("results")
     if not isinstance(results, list):
-        raise SearchFailure("search_unavailable")
+        return [], "search_unavailable"
     sources = []
     for item in results[:5]:
         if not isinstance(item, dict):
@@ -85,7 +84,7 @@ def _sources(tool_message: Any, max_snippet_chars: int) -> list[dict[str, str]]:
             "url": url,
             "snippet": str(item.get("snippet", ""))[:max_snippet_chars],
         })
-    return sources
+    return sources, None
 
 
 async def stream_agent(
@@ -182,15 +181,20 @@ async def stream_agent(
                         continue
                     if name != "web_search":
                         raise RuntimeError("provider_tool_loop_failed")
-                    sources = _sources(result, max_snippet_chars)
+                    sources, error_code = _sources(result, max_snippet_chars)
+                    status = "error" if error_code else "success"
                     observe("agent_tool_result", tool_name=name, tool_call_id=call_id,
+                            status=status, error_code=error_code,
                             result_count=len(sources))
                     for source in sources:
                         if source["url"] not in known_urls and len(all_sources) < 5:
                             known_urls.add(source["url"])
                             all_sources.append(source)
+                    # Every result keeps its own status and ID. On failure,
+                    # preserve links from prior successful tool calls.
                     yield {"type": "sources", "sources": list(all_sources),
-                           "tool_call_id": call_id}
+                           "tool_call_id": call_id, "status": status,
+                           "error_code": error_code}
     if not cancelled.is_set() and not final_model_completed:
         raise RuntimeError("provider_tool_loop_failed")
     if not cancelled.is_set() and (not answer_committed or not answer_emitted):

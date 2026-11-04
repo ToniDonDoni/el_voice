@@ -52,7 +52,9 @@ class LLMServiceClient:
         timeout = httpx.Timeout(connect=3, read=None, write=5, pool=3)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
             try:
-                async with client.stream("POST", endpoint, json={"text": text}) as response:
+                async with client.stream(
+                    "POST", endpoint, json={"text": text, "trace_id": turn_id},
+                ) as response:
                     if response.status_code != 200:
                         raise LLMServiceError(f"llm_service_http_{response.status_code}")
                     lines = response.aiter_lines().__aiter__()
@@ -79,6 +81,9 @@ class LLMServiceClient:
                             event = json.loads(line)
                         except json.JSONDecodeError as exc:
                             raise LLMServiceError("invalid_llm_service_event") from exc
+                        response_trace_id = event.get("trace_id")
+                        if response_trace_id is not None and response_trace_id != turn_id:
+                            raise LLMServiceError("llm_service_trace_id_mismatch")
                         if event.get("type") == "error":
                             raise LLMServiceError(str(event.get("code") or "generation_failed"))
                         if event.get("type") == "done":

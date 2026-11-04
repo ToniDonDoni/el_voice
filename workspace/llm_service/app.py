@@ -18,6 +18,7 @@ from .context import ConversationStore
 from .local_provider import LocalGemmaProvider
 from .remote_provider import OpenCodeLangChainProvider, ProviderConfigurationError
 from .search import SearchFailure
+from observability import log_structured, utc_timestamp
 
 logger = logging.getLogger("el_voice.llm")
 logger.setLevel(logging.INFO)
@@ -30,6 +31,7 @@ MAX_USER_TEXT_CHARS = 8000
 
 class TurnRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_USER_TEXT_CHARS)
+    trace_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
 
 
 class BackendUnavailable(RuntimeError):
@@ -109,7 +111,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                 _app.state.service = LLMService(None, selected_mode)
                 _app.state.service.ready = False
                 _app.state.service.error = safe_error_code(exc)
-                logger.error("LLM provider configuration failed: %s", _app.state.service.error)
+                log_structured(logger, "llm_provider_configuration_failed",
+                               error_code=_app.state.service.error, mode=selected_mode)
         try:
             yield
         finally:
@@ -145,6 +148,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
     async def stream_turn(session_id: str, turn_id: str, request: TurnRequest):
         if not IDENTITY_RE.fullmatch(session_id) or not IDENTITY_RE.fullmatch(turn_id):
             raise HTTPException(400, "Invalid session or turn identity")
+        trace_id = request.trace_id or turn_id
+        if trace_id != turn_id:
+            raise HTTPException(400, "trace_id must match the turn_id in the request path")
         current = require_service()
         try:
             state = current.contexts.get(session_id)
@@ -158,6 +164,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                 cancelled = asyncio.Event()
                 state.active_turn_id = turn_id
                 state.cancel_event = cancelled
+                log_structured(logger, "llm_turn_started", session_id=session_id,
+                               turn_id=turn_id, trace_id=trace_id, mode=current.mode)
                 queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=12)
                 producer_finished = asyncio.Event()
                 reply_parts: list[str] = []
@@ -167,6 +175,7 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         history = current.contexts.trimmed_history(state.history)
                         provider_stream = current.provider.stream(
                             request.text, history, cancelled, session_id=session_id,
+                            turn_id=trace_id,
                         )
                         async with aclosing(provider_stream):
                             async for event in provider_stream:
@@ -186,15 +195,24 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                                                  "result_count": min(5, max(0, int(event.get("result_count", 0))))}))
                         if not cancelled.is_set() and reply_parts:
                             current.contexts.remember(state, request.text, "".join(reply_parts))
+                            log_structured(logger, "llm_turn_completed", session_id=session_id,
+                                           turn_id=turn_id, trace_id=trace_id,
+                                           response_chars=sum(map(len, reply_parts)))
                             await queue.put(("event", {"type": "done"}))
                         elif not cancelled.is_set():
+                            log_structured(logger, "llm_turn_empty_generation", session_id=session_id,
+                                           turn_id=turn_id, trace_id=trace_id)
                             await queue.put(("event", {"type": "error", "code": "empty_generation",
                                                          "message": "The selected language provider returned no answer."}))
                     except asyncio.CancelledError:
                         cancelled.set()
+                        log_structured(logger, "llm_turn_cancelled", session_id=session_id,
+                                       turn_id=turn_id, trace_id=trace_id)
                     except Exception as exc:
                         code = safe_error_code(exc)
-                        logger.warning("LLM turn failed: code=%s mode=%s", code, current.mode)
+                        log_structured(logger, "llm_turn_failed", session_id=session_id,
+                                       turn_id=turn_id, trace_id=trace_id,
+                                       mode=current.mode, error_code=code)
                         await queue.put(("event", {"type": "error", "code": code,
                                                      "message": "The selected language provider could not complete this turn."}))
                     finally:
@@ -210,6 +228,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                             if producer_finished.is_set():
                                 break
                             continue
+                        event.setdefault("timestamp", utc_timestamp())
+                        event["turn_id"] = turn_id
+                        event["trace_id"] = trace_id
                         yield (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
                     await task
                 finally:
@@ -232,6 +253,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
         current = require_service()
         state = current.contexts.sessions.get(session_id)
         if state and state.active_turn_id == turn_id:
+            log_structured(logger, "llm_turn_cancel_requested", session_id=session_id,
+                           turn_id=turn_id, trace_id=turn_id)
             if state.cancel_event is not None:
                 state.cancel_event.set()
             if state.active_task is not None and not state.active_task.done():

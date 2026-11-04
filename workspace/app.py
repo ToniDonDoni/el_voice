@@ -22,6 +22,7 @@ import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from observability import log_structured, utc_timestamp
 
 from voice_pipeline import (
     MODEL_ROOT,
@@ -43,7 +44,11 @@ if not logger.handlers:
 
 def log_event(event: str, **fields: Any) -> None:
     """Write one structured local diagnostic record; never include audio payloads."""
-    logger.info(json.dumps({"event": event, **fields}, ensure_ascii=False, separators=(",", ":")))
+    if fields.get("turn_id"):
+        fields["trace_id"] = fields["turn_id"]
+    elif fields.get("new_turn_id"):
+        fields["trace_id"] = fields["new_turn_id"]
+    log_structured(logger, event, **fields)
 
 ROOT = Path(__file__).resolve().parent
 runtime = VoiceRuntime()
@@ -153,6 +158,11 @@ async def client_error(request: Request) -> Response:
 async def queue_event(session: VoiceSession, event: dict[str, Any], turn_id: str | None = None) -> None:
     if session.stopped:
         return
+    event = dict(event)
+    event.setdefault("timestamp", utc_timestamp())
+    if turn_id:
+        event["turn_id"] = turn_id
+        event["trace_id"] = turn_id
     await session.outgoing.put(Outbound(event=event, turn_id=turn_id))
 
 

@@ -20,7 +20,7 @@ from llm_service.app import LLMService, create_app
 class LLMClientIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_streams_through_service_api_and_clears_context(self):
         class Provider:
-            async def stream(self, text, _history, _cancelled, session_id=""):
+            async def stream(self, text, _history, _cancelled, session_id="", turn_id=""):
                 yield {"type": "delta", "text": f"answer: {text}"}
 
         service = LLMService(Provider(), mode="remote")

@@ -116,9 +116,12 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         self.assertTrue(all(event["status_code"] == 200 for event in responses))
         self.assertTrue(all(event["session_header_present"] for event in responses))
         search_events = [event for event in log_events if event["event"] == "remote_web_search_completed"]
-        self.assertEqual(search_events, [{
-            "event": "remote_web_search_completed", "backend": "configured", "result_count": 1,
-        }])
+        self.assertEqual(len(search_events), 1)
+        self.assertEqual(search_events[0]["backend"], "configured")
+        self.assertEqual(search_events[0]["result_count"], 1)
+        self.assertEqual(search_events[0]["trace_id"], "4" * 32)
+        self.assertEqual(search_events[0]["turn_id"], "4" * 32)
+        self.assertIn("timestamp", search_events[0])
         self.assertNotIn("test-key", " ".join(record.getMessage() for record in provider_log.records))
         self.assertNotIn("Find the latest Dota patch notes", " ".join(
             record.getMessage() for record in provider_log.records

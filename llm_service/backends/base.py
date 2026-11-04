@@ -42,6 +42,6 @@ class Backend(Protocol):
         """Content-free readiness information for ``/status``."""
 
     def stream(
-        self, messages: list[dict], cancel: threading.Event
+        self, messages: list[dict], cancel: threading.Event, session_id: str | None = None
     ) -> AsyncIterator[dict]:
         """Yield events for one prompt. Must observe ``cancel``."""

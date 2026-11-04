@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 import threading
+import uuid
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -44,6 +45,7 @@ CANCEL_GRACE_SECONDS = 5.0
 class ConnectionState:
     history: ConversationHistory
     websocket: WebSocket
+    session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     task: asyncio.Task | None = None
     cancel: threading.Event | None = None
@@ -200,6 +202,9 @@ def create_app(backend: Backend | None = None, config: ServiceConfig | None = No
         finally:
             await _stop_active(conn)
             conn.history.reset()
+            release = getattr(state.backend, "release_session", None)
+            if callable(release):
+                release(conn.session_id)
             state.active_sessions = max(0, state.active_sessions - 1)
             logger.info("ws: connection closed (active=%d)", state.active_sessions)
 

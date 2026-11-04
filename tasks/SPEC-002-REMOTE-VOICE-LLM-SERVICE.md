@@ -37,6 +37,9 @@ browser acceptance checks have been completed.
   and the UI shows clickable sources. Spoken replies remain concise and do not
   read raw URLs. Search is invoked when requested or needed for current facts;
   ordinary conversational turns need not search.
+- Send a unique `x-opencode-session` value per conversation/session in every provider
+  request, stable for all turns of that session and not shared between sessions; the
+  value is routing metadata, not a credential, and must not be logged with content.
 - Keep provider keys exclusively in the remote service at runtime. Preserve local
   mode without credentials, remote calls, or search. Update project guidance during
   implementation to describe this explicitly authorized remote-mode extension to
@@ -175,7 +178,21 @@ commands and mode differences. Verify local regressions and deterministic failur
 cases first, then the real endpoint, search, and Mac browser scenarios. Record
 outcomes without modifying the original task or its acceptance criteria.
 
-## 6. ToDo
+## 6. Implementation follow-ups (added on request)
+
+- [x] Default-on interruption toggle in the browser: OFF in noisy rooms makes the
+  assistant finish its answer (server-enforced, persisted); ON keeps barge-in.
+  Implemented in `workspace/static/index.html`/`app.js`/`pipeline.py`; reviewed PASS.
+- [x] Deployed commit badge in the bottom-left of the page, resolved from
+  `EL_VOICE_COMMIT`, `/data/COMMIT`, `workspace/COMMIT` or local Git metadata and
+  exposed through `/api/status`; `tools/write_commit.sh` records it for Compose.
+- [x] Unique `x-opencode-session` per conversation: each LLM-service WebSocket session
+  gets its own UUID and a matching model client; the header is released with the
+  session. Live provider verification of this header still requires an API key.
+- [ ] Runtime verification of both launch modes with Docker, a live OpenCode Go key and
+  a real browser remains outstanding (no Docker daemon/browser/key in this environment).
+
+## 7. ToDo
 
 - [ ] Confirm provider URL, model access, streaming/tool compatibility, and a working
   search backend; record required packages and runtime configuration.

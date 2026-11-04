@@ -87,7 +87,8 @@ class LocalBackend:
         }
 
     # -- generation --------------------------------------------------------
-    async def stream(self, messages: list[dict], cancel: threading.Event):
+    async def stream(self, messages: list[dict], cancel: threading.Event,
+                     session_id: str | None = None):
         if self._llm is None:
             raise BackendError(
                 "local_model_not_ready",

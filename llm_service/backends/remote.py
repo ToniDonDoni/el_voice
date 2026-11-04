@@ -81,6 +81,8 @@ class RemoteBackend:
         self._search = search
         self._tool = tool
         self._model_with_tools = None
+        self._models: dict[str, object] = {}
+        self._model_factory = None
         self._error: str | None = None
         self._started = False
         self._provider_checked = False
@@ -104,8 +106,8 @@ class RemoteBackend:
             if self._search is None:
                 self._search = self._default_search
             if self._chat_model is None:
-                self._chat_model = self._build_model()
-            self._model_with_tools = self._chat_model.bind_tools([self._tool])
+                self._model_factory = self._build_model_for_session
+            self._model_with_tools = self._model_for(None)
         except BackendError as exc:
             self._error = exc.message
             raise
@@ -118,7 +120,26 @@ class RemoteBackend:
                 retryable=False,
             ) from exc
 
-    def _build_model(self):
+    def _model_for(self, session_id: str | None):
+        """Return a bound model for a conversation, creating it lazily."""
+        if self._chat_model is not None:
+            return self._chat_model.bind_tools([self._tool])
+        key = session_id or "default"
+        model = self._models.get(key)
+        if model is None:
+            model = self._model_factory(key).bind_tools([self._tool])
+            if len(self._models) >= 32:
+                self._models.pop(next(iter(self._models)))
+            self._models[key] = model
+        return model
+
+    def release_session(self, session_id: str) -> None:
+        self._models.pop(session_id, None)
+
+    def _build_model_for_session(self, session_id: str):
+        return self._build_model(session_id)
+
+    def _build_model(self, session_id: str | None = None):
         api_key = self._config.remote.api_key
         if not api_key:
             raise BackendError(
@@ -146,7 +167,8 @@ class RemoteBackend:
             # and prompt caching. The value is not a credential.
             default_headers={
                 "User-Agent": "el-voice/1.0",
-                "x-opencode-session": self._config.remote.session_id,
+                # Unique per conversation; stable across the turns of one session.
+                "x-opencode-session": session_id or self._config.remote.session_id,
             },
         )
 
@@ -178,9 +200,11 @@ class RemoteBackend:
 
     # -- generation --------------------------------------------------------
     async def stream(
-        self, messages: list[dict], cancel: threading.Event
+        self, messages: list[dict], cancel: threading.Event,
+        session_id: str | None = None,
     ) -> AsyncIterator[dict]:
-        if self._model_with_tools is None:
+        model_with_tools = self._model_for(session_id) if self._model_factory else self._model_with_tools
+        if model_with_tools is None:
             raise BackendError(
                 "remote_model_not_ready",
                 self._error or "The remote provider is not configured.",
@@ -196,7 +220,7 @@ class RemoteBackend:
             pending: str | None = None
             tool_requested = False
             try:
-                async for chunk in self._model_with_tools.astream(conversation):
+                async for chunk in model_with_tools.astream(conversation):
                     if cancel.is_set():
                         return
                     full = chunk if full is None else full + chunk

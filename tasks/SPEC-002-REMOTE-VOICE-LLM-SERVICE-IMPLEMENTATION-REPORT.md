@@ -36,7 +36,7 @@ Provider configuration (Remote mode only):
 | `OPENCODE_GO_API_KEY` | blank; must be supplied in ignored `.env` | No key available |
 | `OPENCODE_GO_BASE_URL` | `https://opencode.ai/zen/go/v1` | Unauthenticated `GET /models` answered 200; no authenticated completion |
 | `OPENCODE_GO_MODEL` | `deepseek-v4.1-flash` | Model appears in the unauthenticated model list; no completion |
-| `OPENCODE_GO_SESSION_ID` | random `el-voice-<uuid>` per process | Header requirement observed in provider docs/error; not verified with a key |
+| `x-opencode-session` | fresh UUID per LLM-service WebSocket session | Header requirement observed in provider docs/error; unique per conversation is unit-tested, live verification needs a key |
 
 The provider documentation advertises `https://opencode.ai/inference/go/openai/v1` and asks
 agent clients for a stable `x-opencode-session` header. The service sends that header (and an

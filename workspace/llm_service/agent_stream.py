@@ -98,6 +98,7 @@ async def stream_agent(
     tool_count = 0
     answer_committed = False
     answer_emitted = False
+    final_model_completed = False
     all_sources: list[dict[str, str]] = []
     known_urls: set[str] = set()
     call_names: dict[str, str] = {}
@@ -139,6 +140,7 @@ async def stream_agent(
                 if answer_committed:
                     if calls:
                         raise RuntimeError("provider_tool_loop_failed")
+                    final_model_completed = True
                     if not answer_emitted and _text(response):
                         answer_emitted = True
                         yield {"type": "delta", "text": _text(response)}
@@ -146,6 +148,8 @@ async def stream_agent(
                 if not calls:
                     # A planning step must explicitly enter final-answer mode.
                     # Never speak a possible tool-call preamble.
+                    raise RuntimeError("provider_tool_loop_failed")
+                if any(call.get("name") == "begin_final_answer" for call in calls) and len(calls) != 1:
                     raise RuntimeError("provider_tool_loop_failed")
                 for call in calls:
                     call_id = str(call.get("id") or "")
@@ -187,5 +191,7 @@ async def stream_agent(
                             all_sources.append(source)
                     yield {"type": "sources", "sources": list(all_sources),
                            "tool_call_id": call_id}
+    if not cancelled.is_set() and not final_model_completed:
+        raise RuntimeError("provider_tool_loop_failed")
     if not cancelled.is_set() and (not answer_committed or not answer_emitted):
         raise RuntimeError("empty_generation")

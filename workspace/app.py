@@ -58,6 +58,8 @@ class VoiceSession:
     vad: Any
     outgoing: asyncio.Queue[Outbound] = field(default_factory=lambda: asyncio.Queue(maxsize=8))
     current_turn: Turn | None = None
+    interrupt_enabled: bool = True
+    ignored_speech: bool = False
     turns: dict[str, Turn] = field(default_factory=dict)
     history: list[dict[str, str]] = field(default_factory=list)
     tasks: set[asyncio.Task] = field(default_factory=set)
@@ -401,6 +403,9 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
                  "code": getattr(exc, "code", type(exc).__name__)},
                 turn.turn_id,
             )
+            await queue_event(
+                session, {"type": "turn_failed", "turn_id": turn.turn_id}, turn.turn_id
+            )
     finally:
         if answer_parts and not reply_logged and not session.is_current(turn):
             log_event("assistant_reply_interrupted", session_id=session.session_id, turn_id=turn.turn_id,
@@ -479,7 +484,16 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         return
     kind = event.get("type")
     turn_id = event.get("turn_id")
-    if kind == "client_error":
+    if kind == "interrupt_setting":
+        enabled = event.get("enabled")
+        if type(enabled) is not bool:
+            await queue_event(session, {
+                "type": "error", "message": "Interrupt setting must be a boolean.",
+            })
+            return
+        session.interrupt_enabled = enabled
+        await queue_event(session, {"type": "interrupt_setting", "enabled": enabled})
+    elif kind == "client_error":
         log_event("browser_error", session_id=session.session_id,
                   error=str(event.get("message", "Unknown browser error"))[:500])
     elif kind == "playback_queue":
@@ -563,6 +577,15 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
     event, completed_audio, score = session.vad.accept(frame)
     if event == "start":
         previous = session.current_turn
+        if previous and not session.interrupt_enabled:
+            session.ignored_speech = True
+            log_event("speech_ignored_during_reply", session_id=session.session_id,
+                      turn_id=previous.turn_id, reason="interrupt_disabled")
+            await queue_event(session, {
+                "type": "speech_ignored", "turn_id": previous.turn_id,
+            })
+            return
+        session.ignored_speech = False
         turn = Turn(turn_id=uuid.uuid4().hex)
         session.current_turn = turn
         session.remember_turn(turn)
@@ -590,6 +613,9 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
             turn.turn_id,
         )
     elif event == "end" and completed_audio is not None and session.current_turn:
+        if session.ignored_speech:
+            session.ignored_speech = False
+            return
         turn = session.current_turn
         turn.speech_end_at = time.monotonic()
         log_event("speech_ended", session_id=session.session_id, turn_id=turn.turn_id,
@@ -598,6 +624,8 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
         task = asyncio.create_task(process_turn(session, turn, completed_audio), name=f"turn-{turn.turn_id}")
         session.tasks.add(task)
         task.add_done_callback(session.tasks.discard)
+    elif event == "empty" and session.ignored_speech:
+        session.ignored_speech = False
     elif event == "empty" and session.current_turn:
         await queue_event(session, {"type": "empty_turn"})
         session.current_turn = None
@@ -629,9 +657,12 @@ async def voice_socket(websocket: WebSocket) -> None:
     try:
         start_message = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         start = json.loads(start_message)
-        if start.get("type") != "start" or start.get("sample_rate") != SAMPLE_RATE:
+        interrupt_enabled = start.get("interrupt_enabled", True)
+        if (start.get("type") != "start" or start.get("sample_rate") != SAMPLE_RATE
+                or type(interrupt_enabled) is not bool):
             await queue_event(session, {"type": "error", "message": "Unsupported audio format."})
             return
+        session.interrupt_enabled = interrupt_enabled
         await queue_event(
             session,
             {
@@ -641,6 +672,7 @@ async def voice_socket(websocket: WebSocket) -> None:
                 "vad": "silero-streaming",
                 "echo_cancellation": start.get("echo_cancellation"),
                 "headphones_required": True,
+                "interrupt_enabled": session.interrupt_enabled,
             },
         )
         while not session.stopped:

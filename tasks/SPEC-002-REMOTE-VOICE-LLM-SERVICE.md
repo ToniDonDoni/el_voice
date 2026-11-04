@@ -104,7 +104,7 @@ provides a search API or that hosted search is built into this model.
   Distinguish local cancellation from any unverified provider-side cancellation.
   Disconnect, stop/restart, timeout, rate-limit, and provider failure recover without
   stuck sessions, duplicate answers, or unbounded retries and queues.
-- [ ] **Configurable interruption:** The shared checked-by-default browser control
+- [x] **Configurable interruption:** The shared checked-by-default browser control
   interrupts Remote Voice when enabled. When disabled, speech during an active
   reply does not cancel remote generation/search or stop playback, and does not
   start a competing turn. The reply completes; a later utterance is accepted.
@@ -193,7 +193,7 @@ outcomes without modifying the original task or its acceptance criteria.
 - [x] Implement the remote LangChain agent, bounded context, and real search tool.
 - [x] Add Local Voice / Remote Voice Compose configurations and runtime secrets.
 - [x] Integrate voice streaming, cancellation, source display, and mode indication.
-- [ ] Add and test the shared default-on interrupt preference in both modes.
+- [x] Add and test the shared default-on interrupt preference in both modes.
 - [x] Update README, scoped project guidance, locks, and reproducible checks.
 - [ ] Complete local and remote acceptance and publish the criterion-by-criterion
   implementation report with remaining limitations.

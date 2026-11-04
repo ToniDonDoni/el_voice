@@ -9,6 +9,7 @@ class Element {
     this.classList = { add() {}, remove() {}, contains() { return false; } };
     this.dataset = {};
     this.value = "1";
+    this.checked = false;
   }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   setAttribute(name, value) { this.attributes ||= new Map(); this.attributes.set(name, value); }
@@ -76,7 +77,10 @@ function harness() {
     querySelector(selector) {
       if (!elements.has(selector)) {
         const element = new Element();
-        if (selector === "#interrupt-toggle") element.checked = true;
+        if (selector === "#interrupt-toggle") {
+          const markup = html.match(/<input[^>]*id="interrupt-toggle"[^>]*>/)?.[0] || "";
+          element.checked = /\bchecked\b/.test(markup);
+        }
         elements.set(selector, element);
       }
       return elements.get(selector);
@@ -221,6 +225,34 @@ async function run() {
       "the browser must report playback completion after both sources finish");
   });
 
+  await check("failed turns release the server playback slot", async () => {
+    const { api } = harness();
+    const audio = new FakeAudioContext();
+    const socket = new FakeWebSocket();
+    api.setAudio(audio, socket);
+    const turn = "00112233445566778899aabbccddeeff";
+    await api.handleServerMessage(makePacket(turn, 0, 24000));
+    const source = audio.sources.find(item => item.when !== undefined);
+    assert.ok(source, "partial audio must remain scheduled after a later generation failure");
+    await api.handleServerMessage(JSON.stringify({
+      type: "error", turn_id: turn, message: "The assistant could not complete this turn.",
+    }));
+    await api.handleServerMessage(JSON.stringify({ type: "turn_failed", turn_id: turn }));
+    const finishedAcknowledgement = () => socket.sent.some(message => {
+      try {
+        const event = JSON.parse(message);
+        return event.type === "playback_finished" && event.turn_id === turn;
+      } catch (_) {
+        return false;
+      }
+    });
+    assert.equal(finishedAcknowledgement(), false,
+      "the browser must let already scheduled audio finish before releasing the turn");
+    audio.finishNext();
+    assert.equal(finishedAcknowledgement(), true,
+      "the browser must acknowledge after queued partial audio finishes");
+  });
+
   await check("WebSocket closure immediately stops scheduled playback", async () => {
     const { api } = harness();
     const audio = new FakeAudioContext();
@@ -295,10 +327,24 @@ async function run() {
     const markup = html.match(/<input[^>]*id="interrupt-toggle"[^>]*>/)?.[0];
     assert.ok(markup && /\btype="checkbox"/.test(markup) && /\bchecked\b/.test(markup),
       "the interrupt checkbox must be visible and checked by default");
-    assert.match(html, /<label[^>]*for="interrupt-toggle"[^>]*>Interrupt assistant when I speak<\/label>/,
+    assert.match(html, /<label[^>]*for="interrupt-toggle"[^>]*>[\s\S]*?Interrupt assistant when I speak[\s\S]*?<\/label>/,
       "the preference must have an accessible visible label");
     assert.match(html, /When off, speech during an active reply is ignored/,
       "the control must explain that speech during an active reply is ignored when disabled");
+
+    const playbackHarness = harness();
+    playbackHarness.api.setAudio(new FakeAudioContext(), new FakeWebSocket());
+    await playbackHarness.api.handleServerMessage(makePacket("00112233445566778899aabbccddeeff", 0, 24000));
+    const playbackToggle = playbackHarness.elements.get("#interrupt-toggle");
+    playbackToggle.checked = false;
+    playbackToggle.listeners.get("change")({ currentTarget: playbackToggle });
+    assert.equal(playbackHarness.elements.get("#status-label").textContent,
+      "Speaking · interruption is off", "the playback status must describe the disabled setting");
+    playbackToggle.checked = true;
+    playbackToggle.listeners.get("change")({ currentTarget: playbackToggle });
+    assert.equal(playbackHarness.elements.get("#status-label").textContent,
+      "Speaking · you can interrupt", "the playback status must update when interruption is re-enabled");
+
     const { api, elements } = harness();
     await api.connectSocket();
     let ws = FakeWebSocket.instances.at(-1);

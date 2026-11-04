@@ -13,7 +13,8 @@ GPT-6.1 Sol High independently reviewed the SPEC-002 diff and approved cycle 3
 with no blocking findings. This is a **code-review approval, not full acceptance**.
 The new ARM64 image was not built or started, no user API key was supplied or
 used, no live OpenCode request or internet search was made, and no browser/mic
-conversation was run. The acceptance criteria in the specification are unchanged.
+conversation was run. Existing acceptance criteria remain intact; the requested
+configurable-interruption criterion is additive.
 
 ## Verification performed
 
@@ -42,6 +43,7 @@ conversation was run. The acceptance criteria in the specification are unchanged
 | Real web search | PARTIAL | Typed search tool, limits, public HTTPS filtering, error handling, process cancellation, and bounded admission are tested with fakes. No live DDG results or grounded spoken answer were observed; any backend policy/credential requirement remains to be confirmed. |
 | Voice streaming | PARTIAL | Existing incremental audio/browser regressions pass; only final answer deltas are routed to TTS, and source/tool events have a UI path. No live Remote browser conversation or proof of first audio before full DeepSeek generation was performed. |
 | Interruption and recovery | PARTIAL | Deterministic tests cover cancellation across the client/service boundary, closing a pending read, search worker termination, stale turns, and error/EOF handling. Live generation/search/playback interruption, provider-side cancellation, reconnect, and stop/restart remain unverified. |
+| Configurable interruption | PASS (deterministic scope) | The rendered browser checkbox was verified checked by default and toggled off/on. WebSocket tests in Local and Remote flows verify that disabled interruption lets the active answer finish, enabled interruption accepts a new turn, and a later turn is accepted after a failure. The full connected browser/microphone flow remains unverified. |
 | Local regression | PARTIAL | Existing regressions pass; local Gemma loading verifies the model receipt, tokenizer assets are packaged, and Local mode has no remote fallback/egress. The new Local service was not started for a real offline conversation. Inherited SPEC-001 acceptance remains incomplete. |
 | Network and credentials | PARTIAL | Static Compose inspection confirms the key and intentional egress are limited to Remote LLM, with no LLM host port and redirects disabled. Runtime network/log inspection against the new containers was not performed. |
 | Data and tool boundaries | PARTIAL | UI disclosure, in-memory context, local audio path, constrained search schema/URL filtering, no shell tool, and disabled external tracing are implemented and inspected. Rendered Remote UI and runtime storage were not exercised. Transcript/reply logs retain the inherited SPEC-001 privacy conflict. |
@@ -51,6 +53,10 @@ conversation was run. The acceptance criteria in the specification are unchanged
 | Criterion-by-criterion report | PASS | This report records every original SPEC-002 acceptance item and distinguishes deterministic evidence from pending deployment/live acceptance. |
 
 ## Remaining acceptance work
+
+Interruption-control regression checks passed in the existing container
+(21 Python pipeline test methods) and both Node browser/audio suites. These deterministic
+checks do not replace the connected browser/microphone acceptance run.
 
 The user must build and start one mode at a time using the commands in the
 repository README. Remote acceptance additionally needs the user-provided key in

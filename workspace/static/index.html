@@ -18,7 +18,7 @@
     <section class="hero" aria-labelledby="title">
       <div class="eyebrow">YOUR LOCAL DOTA COMPANION</div>
       <h1 id="title">Talk strategy.<br><span>Keep it local.</span></h1>
-      <p class="intro">Ask about heroes, builds, matchups, and game concepts. Speak naturally; interrupt the reply whenever you like.</p>
+      <p class="intro">Ask about heroes, builds, matchups, and game concepts. Speak naturally, and choose whether speech interrupts the reply.</p>
     </section>
 
     <section class="panel" aria-label="Voice conversation">
@@ -40,6 +40,13 @@
         <button id="stop-button" class="stop-button" type="button" hidden>End session</button>
         <div class="vad-indicator" id="vad-indicator"><span></span><span></span><span></span><span></span><span></span></div>
         <span class="live-label" id="live-label">MIC OFF</span>
+      </div>
+      <div class="interrupt-control">
+        <label for="interrupt-toggle">
+          <input id="interrupt-toggle" type="checkbox" checked>
+          <span>Interrupt assistant when I speak</span>
+        </label>
+        <p id="interrupt-help">When off, speech during an active reply is ignored; ask again after it finishes.</p>
       </div>
       <div class="playback-controls" aria-label="Assistant playback volume">
         <button id="mute-button" class="text-button" type="button" aria-pressed="false">Mute</button>

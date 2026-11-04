@@ -382,3 +382,454 @@ change; do not mark full SPEC-001 acceptance complete from this code review.
 Only this cycle-3 review entry was appended by the Reviewer. Existing entries,
 acceptance checklists, source/tests/report and the parent spec were preserved.
 No commit was created by the Reviewer.
+
+## RED_REVIEW cycle 4 - 2026-11-04: configurable interruption
+
+**Verdict: FAIL / REQUEST_CHANGES.** The RED failure is valid for the missing
+checkbox, but the proving tests do not yet cover the new user task: keeping an
+active answer running when interruption is disabled. GREEN must wait for the
+missing behavioral RED coverage below.
+
+Reviewed commit `6c08330` on `codex/voice-interruption-toggle`, the user's request,
+the new SPEC-001 User-controlled barge-in criterion, the corresponding SPEC-002
+Configurable interruption criterion, project guidance, the spec-driven-tdd skill,
+and the acceptance-boundary guide. Production source is unchanged by this RED
+commit. The Reviewer changed only this review artifact and created no commit.
+
+### Verification
+
+`node --test workspace/tests/browser_playback.test.cjs` exits 1 with the expected
+failure: `the interrupt checkbox must be visible and checked by default`.
+Existing cases in that file run without another reported failure. This is a
+feature-specific RED rather than a dependency, syntax, or fixture error.
+
+### Acceptance-list summary
+
+| New acceptance behavior | Reviewed test/action and assertion | RED verdict |
+| --- | --- | --- |
+| Visible checked-by-default checkbox and explanation | HTML regex checks checkbox type, checked attribute, and exact label. No rendered visibility or help-text assertion; fixture hardcodes `checked = true`. | PARTIAL; rendered evidence missing |
+| Default preference sent at session start | FakeWebSocket start-message assertion requires `interrupt_enabled === true`. | Covered at browser-script harness boundary |
+| User can select off before starting | No test starts a session after selecting off. | MISSING |
+| Live checkbox updates active session | Harness directly calls change listener and asserts false/true messages. No server receives either message. | PARTIAL |
+| Disabled speech preserves generation/search and playback, completes the reply, and starts no competing turn | No new test sends control/audio through the voice WebSocket or observes response completion/cancellation. | MISSING |
+| Enabled speech cancels active work and accepts replacement speech | Existing browser test consumes a prebuilt interrupt event; no test proves VAD/control-to-server cancellation. | MISSING |
+| A later utterance is accepted after the protected reply finishes | No new server/app-boundary test. | MISSING |
+| Reconnect retains the selected off/on value | No new connection is opened after selecting off. | MISSING |
+| Same preference works in Local and Remote Voice | No mode-parameterized WebSocket behavior test. | MISSING |
+
+### Findings
+
+1. **P1 - Add real voice-WebSocket proving tests for the business behavior.**
+   `workspace/tests/browser_playback.test.cjs:261-283` can become GREEN after only
+   adding a checkbox and sending a JSON flag, while `receive_control` still
+   ignores the flag and `receive_audio` still unconditionally cancels the old
+   turn. Add deterministic tests through `/ws/voice` using production session,
+   control, VAD dispatch, and turn processing; fake only inference/VAD leaves.
+   Start an answer, disable interruption, send detected speech, release the
+   answer producer, and assert the original turn emits its remaining text/audio
+   and completion, its cancellation event stays unset, no interrupt is sent, and
+   no competing transcription/generation starts. Also cover speech during queued
+   playback, normal next-utterance admission after playback finishes, and
+   re-enabled speech causing a real interrupt/replacement turn. Parameterize the
+   shared behavior for Local and Remote mode. These tests must fail for the
+   current unconditional cancellation behavior rather than merely asserting a
+   new field exists.
+
+2. **P1 - Prove the actual visible control at a rendered/browser boundary.**
+   The HTML regex at `workspace/tests/browser_playback.test.cjs:262-266` accepts a
+   hidden checkbox, and the fake document at line 79 supplies the default value
+   without parsing the production DOM. It cannot prove that the user sees the
+   checkbox, its explanation, or can operate it. Add a rendered browser/app test
+   that opens the production HTML/script, asserts the labeled checkbox is visible
+   and checked, observes the nearby disabled-mode explanation, clicks the actual
+   control, and observes the corresponding session message or behavioral effect.
+   A synthetic socket/audio setup is sufficient; real microphone capture is not
+   required for this UI evidence.
+
+3. **P2 - Cover off-before-start and reconnect persistence.**
+   The new harness test checks only a default-on initial handshake and live
+   true/false messages. Select off before a session starts and assert its start
+   message is false; then reconnect after selecting off and assert the replacement
+   connection again sends false. Repeat enabling to establish that current user
+   choice, rather than a constant/default reset, controls each new connection.
+
+The RED commit contains no production implementation and has a trustworthy
+missing-feature failure. Acceptance coverage is incomplete, so this review does
+not authorize GREEN yet. No Docker build/restart, live provider/search request,
+or microphone capture was performed.
+
+## RED_REVIEW cycle 5 - 2026-11-04: configurable interruption
+
+**Verdict: FAIL / REQUEST_CHANGES.** Commit `bde3dc4` adds a useful real voice
+WebSocket regression and closes the missing pre-session/reconnect assertions at
+the browser-script harness boundary. The remaining gaps are protection of a
+still-generating answer, a live transition from enabled to disabled, and rendered
+control evidence. The required behavior has not yet received complete RED
+coverage, so GREEN remains blocked.
+
+### Verification
+
+- `node --test workspace/tests/browser_playback.test.cjs`: expected exit 1 for
+  the absent checked-by-default checkbox.
+- `docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_review_pipeline.py' -k interrupt_toggle`:
+  expected exit 1; both Local and Remote subtests fail because detected speech
+  produces `interrupt` instead of `speech_ignored`. The direct Docker attempt was
+  sandbox-blocked; the same narrowly scoped test ran after approved escalation.
+  No image, service, provider, search, or microphone state was changed.
+- Inspected the full new test and production session/control/audio path. No
+  production implementation is present in either RED commit.
+
+### Acceptance-list summary
+
+| New acceptance behavior | Evidence in the revised RED | Verdict |
+| --- | --- | --- |
+| Visible checked default, label, explanation, actual user operation | HTML regex plus fake Element/listener invocation only. Explanation string now asserted. | PARTIAL; rendered boundary still missing |
+| Initial default-on handshake | FakeWebSocket start message asserts true. | COVERED at script harness boundary |
+| Off selected before starting | Second connection asserts false. | COVERED at script harness boundary |
+| Live disabling during an active reply | Node emits false, but real WebSocket test starts false and only applies true live. | MISSING at server boundary |
+| Disabled speech preserves an unfinished generation/search and remaining reply output | Noise arrives only after `turn_complete`; the generator has already finished. | MISSING |
+| Disabled speech does not cancel active playback | Real WebSocket test reaches playback-started, expects speech_ignored and uncancelled original turn. | Useful target-specific RED; playback continuation/completion not observed |
+| Protected answer reaches playback completion | Test itself sends playback_finished rather than observing browser audio sources complete. | NOT PROVED |
+| Later utterance is admitted | After the synthetic completion acknowledgement, test expects a fresh turn and transcription count 2. | COVERED at app/WebSocket boundary |
+| Re-enabled speech interrupts/replaces | Real WebSocket setting=true round trip then VAD frames require interrupt, cancelled old turn, and fresh replacement completion. | COVERED at app/WebSocket boundary |
+| Selected value survives reconnect | Script harness closes socket and asserts replacement handshake remains false. | COVERED at script harness boundary |
+| Shared Local and Remote behavior | WebSocket test repeats against both fake runtime modes. | COVERED for shared voice policy; no live provider claim |
+
+### Findings
+
+1. **P1 - Exercise disabled interruption before generation completes.**
+   `test_interrupt_toggle_preserves_active_reply_when_off_and_interrupts_when_on`
+   waits for `turn_complete` before it sends the protected speech. Its fake model
+   has already emitted its entire answer, so the test cannot catch cancellation
+   of in-flight generation/search or discarded remaining answer chunks. Hold a
+   deterministic model/remote stream open after producing initial text/audio,
+   send the detected speech while it is still active, then release the stream.
+   Assert the original turn remains uncancelled, remaining text/audio arrives,
+   its completion arrives, and no competing turn starts. Keep the existing
+   playback-only case. A browser audio instrumentation test should establish
+   that scheduled sources finish without being stopped: sending playback_finished
+   from the test only proves that the server accepts that claim.
+
+2. **P1 - Add the requested rendered control check.**
+   Cycle-4 finding 2 remains unresolved. The revised Node test still relies on an
+   HTML regex and a fake document whose `checked` value is supplied by the test;
+   it would accept a hidden input and never clicks the rendered checkbox. Open
+   production HTML/script in an isolated browser, assert the checkbox and helper
+   text are visible and default checked, click the actual checkbox, and observe
+   the setting reaching a synthetic socket or app boundary. No real microphone
+   is needed.
+
+3. **P2 - Test switching interruption off in the active server session.**
+   The real WebSocket test starts with false and tests only the live true update.
+   A server that accepts the initial false but ignores later false changes could
+   pass. Start enabled, issue false over the active WebSocket before the protected
+   speech, observe its acknowledgement, and prove the same uncancelled completion
+   behavior. Retain the separate initial-false handshake coverage.
+
+Only this cycle-5 section was appended. Existing review history, specs, source,
+and tests were preserved; no commit was made by the Reviewer.
+
+## RED_REVIEW cycle 6 - 2026-11-04: configurable interruption
+
+**Verdict: FAIL / REQUEST_CHANGES.** Commit `2c19458` substantially improves the
+WebSocket proof: the first model stream remains blocked after initial audio, and
+the test requires additional synthesis/audio and completion after the protected
+speech. Two concrete issues remain: its start fixture is still explicitly false
+while asserting the default is true, and the rendered browser/control/output
+proof requested in cycles 4 and 5 is still absent.
+
+### Verification
+
+The Reviewer independently reran
+`docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_review_pipeline.py' -k interrupt_toggle`.
+Both Local and Remote subtests fail for the intended current production defect:
+`interrupt != speech_ignored`, while the first answer generator is still blocked
+after delivering its initial PCM packet. Test cleanup releases the blocked fake
+generator. The existing container was used without a build or service restart.
+The unchanged Node test's earlier missing-checkbox RED remains relevant; it was
+not rerun needlessly in this cycle.
+
+### Acceptance-list summary
+
+| Behavior | Revised test evidence | Verdict |
+| --- | --- | --- |
+| In-flight reply survives disabled speech | Initial PCM arrives while fake LLM waits; original turn must stay uncancelled; released stream must yield more synthesis/PCM and completion without another transcription. | COVERED at shared app/WebSocket boundary; target RED reproduced |
+| Live enabled-to-disabled transition | Test sends false live, but its start message still also contains false. | NOT CORRECTLY PROVED |
+| Server default is enabled | Later assertion expects true although explicit false was supplied at start. | INVALID fixture/assertion pairing |
+| Enabled cancellation/replacement and later idle admission | Existing real WebSocket continuation checks preserved for both fake modes. | COVERED at declared app boundary |
+| Checkbox visible/default checked/helper/click | Existing HTML regex and fake Element listener remain the only evidence. | Rendered proof MISSING |
+| Selected off value before start and after reconnect | Existing script-harness assertions preserved. | COVERED at script boundary |
+| Browser reply actually finishes without stopped sources | Test client sends playback_finished after transport completion; no browser observes source completion. | Rendered audio-path proof MISSING |
+
+### Findings
+
+1. **P1 - Correct the initial setting in the live-transition test.**
+   `workspace/tests/test_review_pipeline.py:1015` still sends
+   `"interrupt_enabled": False` in the start payload, whereas the test later
+   asserts `started.interrupt_enabled is True` and describes a default-on
+   enabled-to-disabled transition. A correct implementation honoring the supplied
+   false will fail that assertion; the live false control is currently false-to-
+   false. Omit the initial preference to test the default (or explicitly send
+   true and assert that configured initial state), then send false live. Retain
+   the independent initial-false coverage.
+
+2. **P1 - Add the rendered checkbox and uninterrupted audio-path proof.**
+   Cycles 4/5's rendered-boundary finding remains unchanged. The Node regex can
+   accept a hidden control, its fake document supplies checked state, and no user
+   clicks a real DOM checkbox. Add an isolated browser test using production
+   HTML/script that observes the visible checked control and helper, clicks it,
+   and observes the setting message. With browser-level synthetic audio/socket
+   instrumentation, also verify protected reply audio sources are not stopped
+   and reach their completion path. The WebSocket test proves transport and
+   cancellation policy; its client-generated playback_finished is not evidence
+   that the browser played the answer through. No physical microphone or speaker
+   observation is required for this deterministic browser proof.
+
+Only this cycle-6 section was appended. No production source, tests, specification,
+or earlier review entry was changed, and the Reviewer created no commit.
+
+## RED_REVIEW cycle 8 - 2026-11-04: configurable interruption
+
+**Verdict: FAIL / REQUEST_CHANGES.** Reviewed through `a28edc8`. The in-flight
+generation, live toggle, queued audio preservation, and manual rendered RED gaps
+are now resolved. One acceptance branch remains unproved: the service honoring an
+unchecked preference supplied in the initial WebSocket start message.
+
+### Verification and resolved findings
+
+- The start payload in the live-transition scenario now omits the preference,
+  correctly testing default-on followed by a live false update.
+- The Reviewer independently ran the targeted real-WebSocket test in the existing
+  container. Local and Remote both fail for the intended current behavior,
+  `interrupt != speech_ignored`, while generation remains blocked after initial
+  PCM output. No unrelated setup failure occurs.
+- `node --test workspace/tests/browser_playback.test.cjs` still fails specifically
+  for the absent checkbox. Its new queued-audio case schedules both sources before
+  ignored speech, requires neither to stop, and requires natural completion of
+  both before the browser emits playback_finished.
+- An in-memory mutation making speech_ignored call stopPlayback is rejected by
+  the queued-audio test with `ignored speech must not stop current assistant
+  audio`. The probe changed no repository file.
+- The Reviewer independently opened the production static page at
+  `http://127.0.0.1:18765/static/index.html` in a browser. Start, Mute, volume,
+  and conversation controls rendered; the exact interrupt checkbox role count
+  was 0. This is valid expected rendered RED. No microphone permission or capture
+  was initiated, and the review tab was closed. Positive rendered visibility,
+  default, actual clicking, and output checks remain mandatory in GREEN.
+
+### Acceptance-list summary
+
+| Behavior | Evidence | RED verdict |
+| --- | --- | --- |
+| Visible/default control and explanation | Target-specific Node failure plus independently observed absent checkbox in the rendered production page. | COVERED as RED; positive UI verification required at GREEN |
+| Default-on and live enabled-to-disabled control | Real WebSocket default handshake, live false acknowledgement, protected onset and unfinished generation. | COVERED |
+| Disabled response continues through tail audio and completion | Real WebSocket blocked/released model stream plus production browser handler/audio-source completion harness. Mutation probe rejects an erroneous stop. | COVERED at stated deterministic boundaries |
+| Re-enabled cancellation, replacement, and later idle utterance | Real WebSocket continuation assertions for both fake runtime modes. | COVERED |
+| Client sends selected false before session/reconnect | Node script harness asserts initial-false and reconnect-false messages. | COVERED for the client only |
+| Service honors initial selected false | Real WebSocket test only starts with the preference omitted, then uses the separate live setting message. | MISSING |
+
+### Finding
+
+1. **P1 - Prove the initial unchecked preference at the service boundary.**
+   The Node case verifies outbound `start.interrupt_enabled = false`, but no real
+   voice-WebSocket case sends that field and proves the service uses it. A server
+   that ignores the start field, always initializes true, and correctly supports
+   subsequent interrupt_setting messages would pass the current behavioral tests.
+   A user who unchecked the control before starting (or reconnecting) would still
+   be interrupted. Add a real `/ws/voice` start with false, assert its session
+   acknowledgement is false, and send speech during an active response to assert
+   that the turn remains uncancelled and completes without an interrupt. Reuse the
+   existing deterministic scenario where practical; keep the default-on/live-
+   transition case as well.
+
+Only this cycle-8 section was appended. Source, tests, specifications, and earlier
+review entries were preserved. No commit, image build/restart, live provider/search
+request, or microphone capture was performed by the Reviewer.
+
+## RED_REVIEW cycle 9 - 2026-11-04: configurable interruption
+
+**Verdict: PASS / APPROVED for RED.** Reviewed through `abb7721`. All concrete
+RED findings from cycles 4-8 are addressed. The tests now demonstrate the missing
+feature at the client, voice WebSocket, and browser playback boundaries, with
+independent rendered absence evidence. The Implementer may proceed to GREEN.
+This is not approval of an implementation or completion of live voice acceptance.
+
+### Verification
+
+The Reviewer independently ran
+`docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_review_pipeline.py' -k initially_disabled`.
+Both Local and Remote subtests fail specifically with `interrupt !=
+speech_ignored`: the initially unchecked preference is ignored by current
+production code during active playback. The new case also asserts the start
+acknowledgement is false, original turn is current and uncancelled, and no second
+transcription starts. It uses the actual Uvicorn `/ws/voice` endpoint and leaf
+VAD/model fakes, without embedding the feature in its fixture.
+
+Earlier independently reproduced evidence remains applicable: the default-on/live
+toggle case fails during an unfinished generation; the Node control case fails
+for the absent checkbox; a buggy in-memory ignored-speech handler that stops
+playback is rejected by the queued-source case; the actual rendered production
+static page has no interrupt checkbox. Production files remain unchanged across
+the RED commits. `git diff --check` passes.
+
+### Acceptance-list summary
+
+| New acceptance behavior | Proving evidence | RED verdict |
+| --- | --- | --- |
+| Visible checkbox, default checked, label and explanation | Node markup/script assertions plus independent actual-browser absence observation. | PASS as missing-feature RED; positive rendered check required in GREEN |
+| Default enabled at service start | Real WebSocket case omits the setting and asserts its start acknowledgement is enabled, alongside the later live false policy checks. | PASS |
+| Off choice before start or reconnect | Client tests assert false start/reconnect messages; new real WebSocket initial-false case asserts service acknowledgement and protected playback. | PASS |
+| Live disable while answer is generating/playing | Real WebSocket control, blocked stream, initial PCM, ignored onset, uncancelled original, remaining PCM/synthesis and completion. | PASS |
+| Disabled speech starts no competing turn; later speech is accepted | WebSocket tests assert transcription counts and later fresh-turn completion after playback acknowledgement. | PASS |
+| Enabled voice interrupts and replaces active turn | Live true acknowledgement followed by VAD onset requires actual interrupt, old cancellation, and replacement completion. | PASS |
+| Protected browser playback reaches completion | Production handler harness has two active sources at ignored speech, requires no stop, no early completion, and playback_finished only after both natural end callbacks. | PASS at browser API harness boundary |
+| Shared Local and Remote policy | Both real WebSocket scenarios repeat with Local and Remote fake runtime modes. | PASS for the shared voice control; no external provider claim |
+
+### Findings
+
+None blocking RED. The reviewed tests are relevant, have valid setup and
+feature-specific failures, and do not implement the requested production policy.
+
+### GREEN requirements
+
+Run the reviewed proving tests and relevant regressions after implementation.
+Independently verify the rendered checkbox is visible, checked on a fresh page,
+has its explanation, and changes through an actual click. Confirm the implemented
+client sends the selected setting and reconnect retains it. Keep synthetic audio
+and shared WebSocket evidence distinct from physical microphone/headphone and
+live provider acceptance. The latter is not required to prove this narrow toggle,
+but must not be claimed from these tests.
+
+Only this cycle-9 section was appended. No source, test, spec, or earlier review
+entry was changed, no commit was created, and no build/restart, real provider/search
+request, or microphone capture was performed by the Reviewer.
+
+## GREEN_REVIEW cycle 10 - 2026-11-04: configurable interruption
+
+**Verdict: FAIL / REQUEST_CHANGES.** The normal interruption-toggle journeys pass
+the reviewed regressions, but disabling interruption introduces a reproducible
+error-recovery lockout: a failed turn remains current, so every subsequent speech
+onset is ignored. The implementation must release failed turns before acceptance.
+
+Reviewed the current working diff based on `abb7721`, the original user request,
+the two canonical task specs, project guidance, reviewed RED sequence, code, tests,
+and implementation reports. The setting belongs to the shared voice session; no
+Local/Remote provider architecture or dependencies were changed by the feature.
+
+### Verification performed
+
+- `node --test workspace/tests/audio_capture.test.cjs workspace/tests/browser_playback.test.cjs`:
+  both suites PASS, including the visible-control script assertions, initial and
+  live setting messages, reconnect selection, protected audio sources, and natural
+  playback completion.
+- `docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_review_pipeline.py'`:
+  20 test methods PASS in 5.615 seconds. These include the two new Local/Remote
+  voice-WebSocket scenarios; they are 20 mixed regression methods, not 20 separate
+  WebSocket tests.
+- `git diff --check`: PASS.
+- Independent in-memory production-path failure probe in the existing container:
+  create VoiceSession with interruption false, send start/end VAD frames, let
+  transcribe raise a synthetic error, await process_turn, then send a new onset.
+  Observed first events `speech_started`, `speech_ended`, `error`; the next event
+  is `speech_ignored` for the failed turn, and `session.current_turn` still points
+  to that failed turn. No real model/provider was used.
+- The Implementer reports an actual rendered-browser checked-default/off/on check.
+  The Reviewer's attempt to reopen the temporary static URL was connection-refused
+  because that server was no longer running; positive rendering was not repeated
+  independently in this cycle. The earlier rendered RED observation remains
+  recorded, and the source/Node wiring was inspected.
+
+### Acceptance evidence
+
+| Behavior | Evidence | Current result |
+| --- | --- | --- |
+| Visible checked-default control and explanation | Production checkbox/label/helper inspected; author reports real browser interaction; script tests pass. | PASS at inspected/source/author-rendered boundary |
+| Initial default/off choice and reconnect | Boolean start validation/ack; real WebSocket startup-false/default cases and browser reconnect tests pass. | PASS |
+| Live off while answer is generating/playing | Shared session policy, blocked fake stream, unchanged turn, remaining PCM and completion tests pass in both modes. | PASS for normal deterministic paths |
+| Re-enable and automatic replacement | Real WebSocket true update, old cancellation, and replacement completion pass. | PASS |
+| No stopped/early-finished protected audio | Production handler harness keeps current/queued sources and reports completion only after both end. | PASS at browser API harness boundary |
+| Error recovery with interruption off | Independent probe shows all subsequent speech ignored after a terminal error. | FAIL |
+| Honest remaining acceptance | Reports preserve full connected-mic/provider limits. One report calls all 20 mixed regression methods WebSocket tests. | Limits retained; correct the test-count description |
+
+### Findings
+
+1. **P1 - Release a terminally failed turn when interruption is disabled.**
+   `process_turn` catches STT/LLM/TTS failures and queues an error, but leaves
+   `session.current_turn` set. The browser error handler does not send a completion
+   acknowledgement. The new `receive_audio` guard therefore treats that failed
+   turn as an active reply and sends speech_ignored for every later onset when
+   the checkbox is off. A transient recognition/provider/TTS failure permanently
+   silences the session until the user re-enables interruption or restarts it.
+   End failed-turn ownership and clean up its pending work/audio safely so normal
+   listening resumes. Add a real voice-WebSocket regression, with interruption
+   off, that makes the first inference fail, then proves a subsequent utterance
+   is accepted and can complete without a checkbox/session workaround; cover both
+   modes and account for failure after partial audio where applicable.
+
+2. **P2 - Keep speaking status consistent with the unchecked control.**
+   `playPCM` still unconditionally sets `Speaking · you can interrupt`, even when
+   interruption is disabled. This contradicts the selected control and its helper
+   until a noise event overwrites the status. Render a status matching the active
+   choice and verify it in the browser script/output flow.
+
+Only this cycle-10 section was appended. Production source, tests, specs, reports,
+and earlier review history were preserved. No commit, build/restart, real external
+request, or microphone capture was performed by the Reviewer.
+
+## GREEN_REVIEW cycle 11 - 2026-11-04: configurable interruption
+
+**Verdict: PASS / APPROVED for the interruption-control change.** Both Cycle 10
+findings are resolved. The original narrow user task is implemented: the browser
+offers a default-on checkbox, off protects the active reply from detected speech,
+and on restores voice interruption in the shared Local/Remote voice path. There
+are no remaining high-confidence blocking findings in this feature diff.
+
+Full connected microphone, physical audio, live provider/search, and the broader
+original task acceptance remain unverified as reported; this approval does not
+convert those outstanding criteria to PASS.
+
+### Independent verification
+
+- `docker exec -w /workspace el-voice-voice-1 python -m unittest discover -s tests -p 'test_review_pipeline.py'`:
+  **21 test methods PASS**, 6.262 seconds. This includes startup-false, default-on,
+  live off/on, protected in-flight generation/playback, replacement, next-turn
+  admission, and failed-partial-answer recovery in Local and Remote fake modes.
+- `node --test workspace/tests/audio_capture.test.cjs workspace/tests/browser_playback.test.cjs`:
+  **both suites PASS**, including setting-dependent speaking status, preserved
+  current/queued sources, delayed failed-turn acknowledgement, and reconnect.
+- Original no-audio STT failure rechecked with in-memory production-path probes:
+  server now emits turn_failed; the production browser handler acknowledges a
+  failed turn with no sources; playback_finished releases server ownership and a
+  subsequent onset becomes speech_started. Both probes PASS without file changes.
+- Independently served unchanged production static files at a loopback-only URL,
+  opened the actual page in Chrome, and verified the checkbox and explanation
+  visible, initial checked=true, click-to-false, and click-back-to-true. Screenshot
+  and accessibility state confirmed the layout. No microphone or session start
+  was requested. The temporary tab and static server were closed afterward.
+- `git diff --check`: PASS. Acceptance wording was not weakened to match GREEN;
+  task/report updates describe the new feature and retain live-acceptance limits.
+
+### Finding closure and acceptance matrix
+
+| Requirement or prior finding | Exact evidence | Result |
+| --- | --- | --- |
+| Cycle 10 error lockout | process_turn emits turn_failed after errors; frontend waits for queued sources or immediately acknowledges when none exist. Real WebSocket regression completes a later utterance with interruption still off in both modes; no-audio probes also pass. | FIXED |
+| Cycle 10 misleading status | playPCM and live checkbox change use the selected setting; Node output-flow assertions require off/on wording. | FIXED |
+| Visible default-on control and explanation | Independent real rendered page, actual checkbox clicks, source label/helper and passing script assertions. | PASS |
+| Initial preference and reconnect | Actual service start/default tests plus browser false-before-start/reconnect message tests. | PASS at declared deterministic boundaries |
+| Live off preserves reply without competing work | Reviewed real WebSocket blocked-generation/PCM continuation test remains GREEN; queued-source browser case reaches natural completion. | PASS |
+| Re-enable interrupts and accepts replacement | Shared WebSocket cancellation/replacement tests remain GREEN for Local/Remote fake modes. | PASS |
+| Later utterance and failure recovery | Normal completion and partial-failure WebSocket scenarios accept the next fresh turn while off. | PASS |
+| Reproducible and honest evidence | Reports now correctly describe 21 mixed pipeline test methods, browser checks, and outstanding connected-mic/provider scenarios. | PASS for this feature report |
+
+### Findings
+
+None blocking this feature. The implementation follows the existing shared
+session/protocol and browser architecture without adding packages or provider
+changes. Reviewed RED now passes for the intended reason, and the accepted outcome
+addresses the noisy-environment use case at the tested app/browser boundaries.
+
+Only this cycle-11 section was appended. No source, tests, specs, reports, or prior
+review entries were edited by the Reviewer, and no commit or Docker build/restart
+was performed. All inference/search inputs used deterministic fakes; no physical
+microphone or live external provider request was used.

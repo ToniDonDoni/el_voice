@@ -2,6 +2,7 @@ const TARGET_RATE = 16000;
 const startButton = document.querySelector("#start-button");
 const stopButton = document.querySelector("#stop-button");
 const clearButton = document.querySelector("#clear-button");
+const interruptToggle = document.querySelector("#interrupt-toggle");
 const statusDot = document.querySelector("#status-dot");
 const statusLabel = document.querySelector("#status-label");
 const messages = document.querySelector("#messages");
@@ -248,7 +249,7 @@ async function playPCM(buffer, metadata) {
     }
   }
   liveLabel.textContent = "SPEAKING · LISTENING";
-  setStatus("Speaking · you can interrupt", "busy");
+  setStatus(interruptToggle.checked ? "Speaking · you can interrupt" : "Speaking · interruption is off", "busy");
 }
 
 async function handleServerMessage(data) {
@@ -281,8 +282,14 @@ async function handleServerMessage(data) {
   switch (event.type) {
     case "session_started":
       reconnectAttempt = 0;
+      if (typeof event.interrupt_enabled === "boolean") {
+        interruptToggle.checked = event.interrupt_enabled;
+      }
       setStatus("Listening for your next question", "ready");
       liveLabel.textContent = "LISTENING";
+      break;
+    case "interrupt_setting":
+      if (typeof event.enabled === "boolean") interruptToggle.checked = event.enabled;
       break;
     case "not_ready":
       setStatus("Local models are still loading", "busy");
@@ -299,6 +306,12 @@ async function handleServerMessage(data) {
       vadIndicator.classList.remove("active");
       liveLabel.textContent = "PROCESSING";
       setStatus("Recognizing your speech…", "busy");
+      break;
+    case "speech_ignored":
+      vadIndicator.classList.remove("active");
+      liveLabel.textContent = "SPEAKING";
+      setStatus("Reply continues; interruption is off", "busy");
+      addMessageStatus(event.turn_id, "Speech ignored while the current reply finishes");
       break;
     case "transcript":
       addMessage("user", event.turn_id, event.text);
@@ -323,6 +336,10 @@ async function handleServerMessage(data) {
     case "turn_complete":
       turnComplete.add(event.turn_id);
       addMessageStatus(event.turn_id, "Response generated");
+      if (!playbackSources.get(event.turn_id)?.size) finishPlayback(event.turn_id);
+      break;
+    case "turn_failed":
+      turnComplete.add(event.turn_id);
       if (!playbackSources.get(event.turn_id)?.size) finishPlayback(event.turn_id);
       break;
     case "interrupt": {
@@ -378,6 +395,7 @@ function connectSocket() {
       ws.send(JSON.stringify({
         type: "start",
         sample_rate: TARGET_RATE,
+        interrupt_enabled: interruptToggle.checked,
         echo_cancellation: track?.getSettings?.().echoCancellation ?? null,
       }));
       resolve();
@@ -554,6 +572,18 @@ document.querySelector("#mute-button").addEventListener("click", event => {
 });
 document.querySelector("#volume-control").addEventListener("input", event => {
   if (outputGain && !volumeMuted) outputGain.gain.value = Number(event.currentTarget.value);
+});
+interruptToggle.addEventListener("change", event => {
+  if ([...playbackSources.values()].some(sources => sources.size)) {
+    setStatus(event.currentTarget.checked
+      ? "Speaking · you can interrupt"
+      : "Speaking · interruption is off", "busy");
+  }
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: "interrupt_setting", enabled: event.currentTarget.checked,
+    }));
+  }
 });
 
 function formatMetric(metric) {

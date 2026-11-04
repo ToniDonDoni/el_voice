@@ -74,7 +74,7 @@ Implement and verify incrementally: choose and characterize the VAD and cancella
 - [ ] Implement local VAD onset/endpointing with pre-roll, silence handling, and final Whisper transcription.
 - [ ] Implement per-session/per-turn orchestration with Gemma streaming, overlapping Silero `b_lez` synthesis/playback, `turn_id` validation, and effective cancellation.
 - [ ] Implement the headphone-supported echo policy and verify the assistant does not trigger its own barge-in.
-- [ ] Add the default-on browser interrupt control and verify enabled/disabled behavior during an active reply.
+- [x] Add the default-on browser interrupt control and verify enabled/disabled behavior during an active reply with rendered-browser and deterministic WebSocket checks. Full live-microphone acceptance remains open.
 - [ ] Measure p50/p95 response and interruption latency on the target Mac, then propose targets from the measured baseline.
 - [ ] Verify every P0/P1 criterion in the actual container and browser; record scenarios, commands, measurements, and known limitations.
 

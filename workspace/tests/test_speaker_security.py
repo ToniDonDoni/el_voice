@@ -36,6 +36,48 @@ class SpeakerWebSocketOriginTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(closed.get("reason"), "Unexpected WebSocket origin")
 
 
+class SpeakerProfilePersistenceFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.previous_runtime = app.runtime
+        self.owner_profile = {"kind": "owner", "enabled": True, "embedding": [1.0] * 192}
+        self.guest_profile = {"kind": "guest", "enabled": True, "embedding": [1.0] * 192}
+
+        class FailingStore:
+            def save(self, _profiles):
+                raise OSError("disk is unavailable")
+
+        app.runtime = SimpleNamespace(
+            profile_store=FailingStore(),
+            speaker_model=SimpleNamespace(clear=lambda _profile_id: None),
+        )
+        self.session = app.VoiceSession("profile-save-failure", None, None)
+        self.session.speaker_profiles = {"owner": self.owner_profile, "guest-test": self.guest_profile}
+
+    async def asyncTearDown(self):
+        app.runtime = self.previous_runtime
+
+    async def test_failed_profile_enable_save_keeps_memory_and_reports_error(self):
+        await app.receive_control(self.session, json.dumps({
+            "type": "speaker_profile_enabled", "profile_id": "owner", "enabled": False,
+        }))
+
+        self.assertIs(self.session.speaker_profiles["owner"], self.owner_profile)
+        self.assertTrue(self.session.speaker_profiles["owner"]["enabled"])
+        error = self.session.outgoing.get_nowait().event
+        self.assertEqual(error["type"], "speaker_error")
+        self.assertIn("existing profile settings were kept", error["message"])
+
+    async def test_failed_profile_delete_save_keeps_memory_and_reports_error(self):
+        await app.receive_control(self.session, json.dumps({
+            "type": "speaker_profile_delete", "profile_id": "guest-test",
+        }))
+
+        self.assertIs(self.session.speaker_profiles["guest-test"], self.guest_profile)
+        error = self.session.outgoing.get_nowait().event
+        self.assertEqual(error["type"], "speaker_error")
+        self.assertIn("existing profiles were kept", error["message"])
+
+
 class SpeakerEnrollmentFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_progress_clock_reports_pressed_state_when_audio_frames_stop(self):
         previous_runtime = app.runtime

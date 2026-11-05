@@ -799,13 +799,15 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         if not isinstance(profile_id, str) or profile_id not in session.speaker_profiles or type(enabled) is not bool:
             await queue_event(session, {"type": "speaker_error", "message": "Invalid speaker profile setting."})
             return
-        profiles = session.speaker_profiles
+        profiles = {key: dict(profile) for key, profile in session.speaker_profiles.items()}
         profiles[profile_id]["enabled"] = enabled
         try:
             await asyncio.to_thread(profile_store().save, profiles)
         except Exception:
-            await queue_event(session, {"type": "speaker_error", "message": "Could not update speaker profile."})
+            await queue_event(session, {"type": "speaker_error",
+                                        "message": "Could not save the speaker setting; the existing profile settings were kept."})
             return
+        session.speaker_profiles = profiles
         if not enabled:
             runtime.speaker_model.clear(profile_id)
         await queue_event(session, {"type": "speaker_profiles", "profiles": public_profiles(profiles),
@@ -815,7 +817,7 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         if not isinstance(profile_id, str) or profile_id not in session.speaker_profiles:
             await queue_event(session, {"type": "speaker_error", "message": "Speaker profile was not found."})
             return
-        profiles = session.speaker_profiles
+        profiles = {key: dict(profile) for key, profile in session.speaker_profiles.items()}
         profiles.pop(profile_id)
         try:
             if profiles:
@@ -824,8 +826,10 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
                 store = profile_store()
                 store.path.unlink(missing_ok=True)
         except Exception:
-            await queue_event(session, {"type": "speaker_error", "message": "Could not delete speaker profile."})
+            await queue_event(session, {"type": "speaker_error",
+                                        "message": "Could not delete the speaker profile; existing profiles were kept."})
             return
+        session.speaker_profiles = profiles
         runtime.speaker_model.clear(profile_id)
         await queue_event(session, {"type": "speaker_profiles", "profiles": public_profiles(profiles),
                                     "filter_enabled": session.speaker_filter_enabled})

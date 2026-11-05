@@ -264,7 +264,7 @@ class StartupValidationTests(unittest.TestCase):
 
     def test_status_exposes_compose_git_revision(self):
         previous_runtime = app.runtime
-        app.runtime = SimpleNamespace(status_snapshot=lambda: {"ready": True, "stage": "ready"})
+        app.runtime = SimpleNamespace(status_snapshot=lambda session=None: {"ready": True, "stage": "ready"})
         try:
             with patch.dict("os.environ", {"EL_VOICE_REVISION": "0123456789abcdef0123456789abcdef01234567"}):
                 response = asyncio.run(app.status())
@@ -274,6 +274,22 @@ class StartupValidationTests(unittest.TestCase):
             )
         finally:
             app.runtime = previous_runtime
+
+    def test_status_reports_metrics_from_active_speaker_session(self):
+        previous_runtime, previous_session = app.runtime, app.active_session
+        app.runtime = voice_pipeline.VoiceRuntime()
+        app.active_session = SimpleNamespace(
+            speaker_profiles={"owner": {"enabled": True}, "guest": {"enabled": False}},
+            speaker_metrics=[{"queue_drops": 2}, {"stale_drops": 3}],
+        )
+        try:
+            response = asyncio.run(app.status())
+            speaker_filter = json.loads(response.body)["speaker_filter"]
+            self.assertEqual(speaker_filter["enabled_profiles"], 1)
+            self.assertEqual(speaker_filter["queue_drops"], 2)
+            self.assertEqual(speaker_filter["stale_drops"], 3)
+        finally:
+            app.runtime, app.active_session = previous_runtime, previous_session
 
 
 class LogPrivacyTests(unittest.TestCase):

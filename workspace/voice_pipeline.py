@@ -418,7 +418,7 @@ class VoiceRuntime:
         pcm = (audio.clamp(-1, 1) * 32767).to(self.torch.int16).numpy().astype("<i2", copy=False)
         return pcm.tobytes(), int(self.config["tts"]["sample_rate"])
 
-    def status_snapshot(self) -> dict[str, Any]:
+    def status_snapshot(self, session: Any | None = None) -> dict[str, Any]:
         timings = list(self.metrics)
         response = [entry["response_ms"] for entry in timings if "response_ms" in entry]
         interrupt = [entry["interrupt_ms"] for entry in timings if "interrupt_ms" in entry]
@@ -434,7 +434,6 @@ class VoiceRuntime:
 
         speaker_model = getattr(self, "speaker_model", None)
         inference = list(getattr(speaker_model, "last_timings_ms", [])) if speaker_model else []
-        session = globals().get("active_session")
         session_metrics = list(getattr(session, "speaker_metrics", [])) if session else []
         queue_drops = sum(item.get("queue_drops", 0) for item in session_metrics)
         stale_drops = sum(item.get("stale_drops", 0) for item in session_metrics)

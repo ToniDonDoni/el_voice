@@ -166,8 +166,9 @@ async def healthz() -> JSONResponse:
 
 @app.get("/api/status")
 async def status() -> JSONResponse:
+    # Session-owned queue metrics are supplied explicitly; VoiceRuntime has no app globals.
     return JSONResponse({
-        **runtime.status_snapshot(),
+        **runtime.status_snapshot(session=active_session),
         "revision": os.environ.get("EL_VOICE_REVISION", "unknown"),
     })
 

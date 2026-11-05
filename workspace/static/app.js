@@ -5,6 +5,14 @@ const clearButton = document.querySelector("#clear-button");
 const interruptToggle = document.querySelector("#interrupt-toggle");
 const webSearchToggle = document.querySelector("#web-search-toggle");
 const webSearchControl = document.querySelector("#web-search-control");
+const speakerFilterToggle = document.querySelector("#speaker-filter-toggle");
+const speakerFilterStatus = document.querySelector("#speaker-filter-status");
+const speakerEnrollmentKind = document.querySelector("#speaker-enrollment-kind");
+const detectSpeakerButton = document.querySelector("#detect-speaker-button");
+const speakerProfileList = document.querySelector("#speaker-profile-list");
+const guestConsent = document.querySelector("#guest-consent");
+const guestConsentLabel = document.querySelector("#guest-consent-label");
+const csrfToken = document.querySelector('meta[name="el-voice-csrf"]')?.content || "";
 const statusDot = document.querySelector("#status-dot");
 const statusLabel = document.querySelector("#status-label");
 const messages = document.querySelector("#messages");
@@ -38,6 +46,8 @@ let volumeMuted = false;
 let echoCancellationSetting = "not checked";
 let unavailableAudioTurns = new Set();
 let fallbackTurns = new Set();
+let speakerEnrollmentHeld = false;
+let sessionSpeakerFilterEnabled = false;
 
 function setStatus(label, state = "") {
   statusLabel.textContent = label;
@@ -159,6 +169,72 @@ function reportClientError(message) {
     }).catch(() => {});
   }
   console.error("EL Voice:", safeMessage);
+}
+
+function sendSpeakerControl(type, fields = {}) {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    speakerFilterStatus.textContent = "Start a voice session before managing speaker profiles.";
+    return false;
+  }
+  socket.send(JSON.stringify({ type, ...fields }));
+  return true;
+}
+
+function renderSpeakerProfiles(profiles = []) {
+  speakerProfileList.replaceChildren();
+  profiles.forEach((profile, index) => {
+    const row = document.createElement("li");
+    const label = document.createElement("label");
+    const enabled = document.createElement("input");
+    enabled.type = "checkbox";
+    enabled.checked = Boolean(profile.enabled);
+    enabled.setAttribute("aria-label", `Enable ${profile.kind} profile ${index + 1}`);
+    enabled.addEventListener("change", () => sendSpeakerControl("speaker_profile_enabled", {
+      profile_id: profile.id, enabled: enabled.checked,
+    }));
+    const name = document.createElement("span");
+    name.textContent = `${profile.kind === "owner" ? "My voice" : `Guest ${index}`} (${profile.enabled ? "enabled" : "disabled"})`;
+    label.append(enabled, name);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${profile.kind} profile`);
+    remove.addEventListener("click", () => sendSpeakerControl("speaker_profile_delete", { profile_id: profile.id }));
+    row.append(label, remove);
+    speakerProfileList.append(row);
+  });
+}
+
+function beginSpeakerEnrollment() {
+  if (speakerEnrollmentHeld) return;
+  if (speakerEnrollmentKind.value === "guest" && !guestConsent.checked) {
+    speakerFilterStatus.textContent = "Ask the guest for consent before enrolling their voice.";
+    return;
+  }
+  speakerEnrollmentHeld = true;
+  if (!sendSpeakerControl("speaker_enrollment_begin", {
+    kind: speakerEnrollmentKind.value,
+    consent: speakerEnrollmentKind.value !== "guest" || guestConsent.checked,
+  })) {
+    speakerEnrollmentHeld = false;
+    return;
+  }
+  detectSpeakerButton.textContent = "Release to save · Cancel to discard";
+  speakerFilterStatus.textContent = "Listening for enrollment speech. Keep speaking clearly for at least 10 seconds.";
+}
+
+speakerEnrollmentKind.addEventListener("change", () => {
+  const guest = speakerEnrollmentKind.value === "guest";
+  guestConsentLabel.hidden = !guest;
+  if (!guest) guestConsent.checked = false;
+});
+
+function finishSpeakerEnrollment(cancel = false) {
+  if (!speakerEnrollmentHeld) return;
+  speakerEnrollmentHeld = false;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  sendSpeakerControl(cancel ? "speaker_enrollment_cancel" : "speaker_enrollment_end");
+  detectSpeakerButton.textContent = "Hold to detect speaker";
 }
 
 function finishPlayback(turnId) {
@@ -296,8 +372,49 @@ async function handleServerMessage(data) {
       if (typeof event.search_enabled === "boolean") {
         webSearchToggle.checked = event.search_enabled;
       }
+      if (typeof event.speaker_filter_enabled === "boolean") {
+        speakerFilterToggle.checked = event.speaker_filter_enabled;
+        sessionSpeakerFilterEnabled = event.speaker_filter_enabled;
+        speakerFilterStatus.textContent = event.speaker_filter_state || "Filtering off";
+      }
+      detectSpeakerButton.disabled = !event.speaker_model_available;
+      renderSpeakerProfiles(event.speaker_profiles || []);
       setStatus("Listening for your next question", "ready");
       liveLabel.textContent = "LISTENING";
+      break;
+    case "speaker_filter_setting":
+      speakerFilterToggle.checked = Boolean(event.enabled);
+      speakerFilterStatus.textContent = event.state || (event.enabled ? "Filtering enabled" : "Filtering off");
+      break;
+    case "speaker_profiles":
+      renderSpeakerProfiles(event.profiles || []);
+      speakerFilterToggle.checked = Boolean(event.filter_enabled);
+      sessionSpeakerFilterEnabled = Boolean(event.filter_enabled);
+      speakerFilterStatus.textContent = event.filter_enabled ? "Filtering enabled" : "Filtering off";
+      break;
+    case "speaker_enrollment":
+      if (event.state === "capturing") {
+        const seconds = Number(event.speech_seconds || 0);
+        speakerFilterStatus.textContent = `Enrollment speech: ${seconds.toFixed(1)} / 10 seconds`;
+      } else if (event.state === "saved") {
+        detectSpeakerButton.textContent = "Hold to detect speaker";
+        speakerFilterToggle.checked = Boolean(event.filter_enabled);
+        sessionSpeakerFilterEnabled = Boolean(event.filter_enabled);
+        guestConsent.checked = false;
+        speakerFilterStatus.textContent = "Speaker profile saved on this device. Filtering enabled.";
+        renderSpeakerProfiles(event.profiles || []);
+      } else if (event.state === "processing") {
+        detectSpeakerButton.textContent = "Saving speaker profile…";
+        speakerFilterStatus.textContent = "Preparing the local speaker filter…";
+      } else {
+        detectSpeakerButton.textContent = "Hold to detect speaker";
+        speakerFilterStatus.textContent = event.state === "cancelled" ? "Enrollment cancelled; existing profiles were kept." : event.state;
+      }
+      break;
+    case "speaker_error":
+      detectSpeakerButton.textContent = "Hold to detect speaker";
+      if (typeof event.enabled === "boolean") speakerFilterToggle.checked = event.enabled;
+      speakerFilterStatus.textContent = event.message || "Speaker filtering error";
       break;
     case "interrupt_setting":
       if (typeof event.enabled === "boolean") interruptToggle.checked = event.enabled;
@@ -437,6 +554,8 @@ function connectSocket() {
         sample_rate: TARGET_RATE,
         interrupt_enabled: interruptToggle.checked,
         search_enabled: webSearchToggle.checked,
+        speaker_filter_enabled: speakerFilterToggle.checked,
+        csrf_token: csrfToken,
         echo_cancellation: track?.getSettings?.().echoCancellation ?? null,
       }));
       resolve();
@@ -563,6 +682,8 @@ async function stopSession(userInitiated = true) {
   startButton.hidden = false;
   startButton.disabled = false;
   webSearchToggle.checked = false;
+  detectSpeakerButton.disabled = true;
+  detectSpeakerButton.textContent = "Hold to detect speaker";
   liveLabel.textContent = "MIC OFF";
   vadIndicator.classList.remove("active");
   if (userInitiated) setStatus("Session ended", "");
@@ -592,6 +713,9 @@ function renderDiagnostics(status) {
     ["Speech recognition", status.models?.stt || "unknown"],
     ["Language model", status.models?.llm || "unknown"],
     ["Voice", status.models?.tts || "unknown"],
+    ["Speaker filter model", status.speaker_filter?.model || status.models?.speaker || "unavailable"],
+    ["Speaker inference p50 / p95", formatMetric(status.speaker_filter?.inference_ms)],
+    ["Speaker queue drops / stale blocks", `${status.speaker_filter?.queue_drops ?? 0} / ${status.speaker_filter?.stale_drops ?? 0}`],
     ["Echo cancellation", echoCancellationSetting],
     ["Response latency p50 / p95", formatMetric(status.metrics?.speech_end_to_first_audio_ms)],
     ["Interrupt latency p50 / p95", formatMetric(status.metrics?.speech_onset_to_playback_stopped_ms)],
@@ -661,6 +785,11 @@ async function pollStatus() {
     const status = await response.json();
     renderBuildRevision(status.revision);
     renderDiagnostics(status);
+    speakerFilterToggle.disabled = status.speaker_filter?.model !== "ready";
+    if (!sessionWanted && speakerFilterToggle.disabled) {
+      speakerFilterStatus.textContent = "Filtering unavailable; legacy voice detection is active.";
+      detectSpeakerButton.disabled = true;
+    }
     const remote = status.mode === "remote";
     webSearchControl.hidden = !remote;
     const badge = document.querySelector("#mode-badge");
@@ -696,6 +825,37 @@ async function pollStatus() {
 }
 
 startButton.addEventListener("click", () => { void startSession(); });
+speakerFilterToggle.addEventListener("change", () => {
+  if (sessionWanted) {
+    speakerFilterToggle.checked = sessionSpeakerFilterEnabled;
+    speakerFilterStatus.textContent = "End the session to change filtering; the choice applies when you reconnect.";
+  }
+  else speakerFilterStatus.textContent = speakerFilterToggle.checked
+    ? "Filtering will start when the next session connects."
+    : "Filtering off — legacy voice detection is active.";
+});
+detectSpeakerButton.addEventListener("pointerdown", event => {
+  if (detectSpeakerButton.disabled || event.button !== 0) return;
+  event.preventDefault();
+  detectSpeakerButton.setPointerCapture?.(event.pointerId);
+  beginSpeakerEnrollment();
+});
+detectSpeakerButton.addEventListener("pointerup", () => finishSpeakerEnrollment(false));
+detectSpeakerButton.addEventListener("pointercancel", () => finishSpeakerEnrollment(true));
+detectSpeakerButton.addEventListener("lostpointercapture", () => finishSpeakerEnrollment(true));
+detectSpeakerButton.addEventListener("keydown", event => {
+  if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+    event.preventDefault();
+    beginSpeakerEnrollment();
+  }
+  if (event.key === "Escape") finishSpeakerEnrollment(true);
+});
+detectSpeakerButton.addEventListener("keyup", event => {
+  if (event.key === " " || event.key === "Enter") {
+    event.preventDefault();
+    finishSpeakerEnrollment(false);
+  }
+});
 stopButton.addEventListener("click", () => { void stopSession(); });
 clearButton.addEventListener("click", () => { void clearChat(); });
 window.addEventListener("pagehide", () => { void stopSession(false); });

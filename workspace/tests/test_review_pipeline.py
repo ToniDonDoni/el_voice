@@ -49,6 +49,26 @@ class StubRuntime:
         return b"\x00\x00" * 480, 24000
 
 
+async def connect_voice_test(port):
+    """Use the same explicit Origin and session-bound CSRF cookie as the browser."""
+    import os
+    import websockets
+
+    origin = f"http://127.0.0.1:{port}"
+    previous = os.environ.get("EL_VOICE_ALLOWED_ORIGINS")
+    os.environ["EL_VOICE_ALLOWED_ORIGINS"] = origin
+    try:
+        return await websockets.connect(
+            f"ws://127.0.0.1:{port}/ws/voice", origin=origin,
+            additional_headers={"Cookie": "el_voice_session=test"}, close_timeout=0.1,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("EL_VOICE_ALLOWED_ORIGINS", None)
+        else:
+            os.environ["EL_VOICE_ALLOWED_ORIGINS"] = previous
+
+
 def turn_id():
     return uuid.uuid4().hex
 
@@ -154,6 +174,10 @@ class StartupValidationTests(unittest.TestCase):
         invalid = {
             "tts": {"model": "tts/v4_cyrillic.pt", "speaker": "b_lez", "sample_rate": 24000, "cpu_threads": 4},
             "stt": {"model": "stt/small", "language": "ru", "cpu_threads": 4},
+            "speaker": {"cpu_threads": 2, "sample_rate": 16000, "chunk_samples": 2560, "start_threshold": 0.75,
+                        "release_threshold": 0.50, "start_chunks": 2, "endpoint_silence_ms": 640,
+                        "max_queue_frames": 32, "max_frame_age_ms": 1000,
+                        "enrollment_min_speech_seconds": 10, "enrollment_max_seconds": 45},
             "vad": {"sample_rate": 16000, "frame_samples": 512, "threshold": 0.55, "negative_threshold": 0.35,
                     "start_frames": 3, "end_silence_ms": 640, "min_speech_ms": 240, "pre_roll_ms": 320,
                     "max_utterance_seconds": 45},
@@ -847,8 +871,8 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(3):
                 while not server.started:
                     await asyncio.sleep(0.01)
-            client = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
-            await client.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            client = await connect_voice_test(port)
+            await client.send(json.dumps({"type": "start", "sample_rate": 16000, "csrf_token": "test"}))
             await client.send(b"\x00\x00" * 512)
             await client.send(b"\x00\x00" * 512)
             async with asyncio.timeout(3):
@@ -870,8 +894,8 @@ class WebSocketCleanupTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(task.done() for task in sender_tasks), "old sender must be stopped")
             self.assertFalse(stalled_session.outgoing._putters, "no blocked queue producers may remain")
             release_send.set()
-            replacement = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
-            await replacement.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            replacement = await connect_voice_test(port)
+            await replacement.send(json.dumps({"type": "start", "sample_rate": 16000, "csrf_token": "test"}))
             session_started = json.loads(await asyncio.wait_for(replacement.recv(), timeout=1))
             self.assertEqual(session_started["type"], "session_started")
             self.assertNotEqual(session_started["session_id"], old_session_id)
@@ -997,11 +1021,9 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     async with asyncio.timeout(3):
                         while not server.started:
                             await asyncio.sleep(0.01)
-                    client = await websockets.connect(
-                        f"ws://127.0.0.1:{listener.getsockname()[1]}/ws/voice", close_timeout=0.1
-                    )
+                    client = await connect_voice_test(listener.getsockname()[1])
                     await client.send(json.dumps({
-                        "type": "start", "sample_rate": 16000, "interrupt_enabled": False,
+                        "type": "start", "sample_rate": 16000, "csrf_token": "test", "interrupt_enabled": False,
                     }))
                     await receive_event(client, "session_started")
 
@@ -1136,11 +1158,9 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     async with asyncio.timeout(3):
                         while not server.started:
                             await asyncio.sleep(0.01)
-                    client = await websockets.connect(
-                        f"ws://127.0.0.1:{listener.getsockname()[1]}/ws/voice", close_timeout=0.1
-                    )
+                    client = await connect_voice_test(listener.getsockname()[1])
                     await client.send(json.dumps({
-                        "type": "start", "sample_rate": 16000, "interrupt_enabled": False,
+                        "type": "start", "sample_rate": 16000, "csrf_token": "test", "interrupt_enabled": False,
                     }))
                     started = await receive_event(client, "session_started")
 
@@ -1284,11 +1304,9 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     async with asyncio.timeout(3):
                         while not server.started:
                             await asyncio.sleep(0.01)
-                    client = await websockets.connect(
-                        f"ws://127.0.0.1:{listener.getsockname()[1]}/ws/voice", close_timeout=0.1
-                    )
+                    client = await connect_voice_test(listener.getsockname()[1])
                     await client.send(json.dumps({
-                        "type": "start", "sample_rate": 16000,
+                        "type": "start", "sample_rate": 16000, "csrf_token": "test",
                         "search_enabled": mode == "remote",
                     }))
                     started, _ = await receive_event(client, "session_started")
@@ -1449,8 +1467,8 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(3):
                 while not server.started:
                     await asyncio.sleep(0.01)
-            client = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
-            await client.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            client = await connect_voice_test(port)
+            await client.send(json.dumps({"type": "start", "sample_rate": 16000, "csrf_token": "test"}))
             while json.loads(await client.recv()).get("type") != "session_started":
                 pass
 
@@ -1617,8 +1635,8 @@ class BrowserAudioBackpressureTests(unittest.IsolatedAsyncioTestCase):
             async with asyncio.timeout(3):
                 while not server.started:
                     await asyncio.sleep(0.01)
-            client = await websockets.connect(f"ws://127.0.0.1:{port}/ws/voice", close_timeout=0.1)
-            await client.send(json.dumps({"type": "start", "sample_rate": 16000}))
+            client = await connect_voice_test(port)
+            await client.send(json.dumps({"type": "start", "sample_rate": 16000, "csrf_token": "test"}))
             while json.loads(await client.recv()).get("type") != "session_started":
                 pass
             await client.send(b"\x00\x00" * 512)

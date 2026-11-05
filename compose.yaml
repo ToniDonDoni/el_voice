@@ -12,6 +12,7 @@ services:
     user: "${LOCAL_UID:-10001}:${LOCAL_GID:-10001}"
     environment:
       EL_VOICE_REVISION: ${EL_VOICE_REVISION:-unknown}
+      EL_VOICE_ALLOWED_ORIGINS: ${EL_VOICE_ALLOWED_ORIGINS:-http://localhost:${EL_VOICE_PORT:-8765},http://127.0.0.1:${EL_VOICE_PORT:-8765}}
     init: true
     volumes:
       - ./workspace:/workspace:ro

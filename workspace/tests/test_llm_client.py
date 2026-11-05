@@ -19,6 +19,28 @@ from llm_service.app import LLMService, create_app
 
 @unittest.skipUnless(HTTPX_AVAILABLE, "Install the pinned HTTPX dependency to run client integration tests")
 class LLMClientIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_client_propagates_search_preference_and_service_defaults_it_off(self):
+        received = []
+
+        class Provider:
+            async def stream(self, text, _history, _cancelled, session_id="", turn_id="",
+                             search_enabled=False):
+                received.append(search_enabled)
+                yield {"type": "delta", "text": text}
+
+        service = LLMService(Provider(), mode="remote")
+        transport = httpx.ASGITransport(app=create_app(service))
+        client = LLMServiceClient("http://llm", transport=transport)
+
+        async def consume(turn_id, text, **kwargs):
+            return [event async for event in client.stream(
+                "a" * 32, turn_id, text, threading.Event(), **kwargs
+            )]
+
+        await consume("b" * 32, "enabled", search_enabled=True)
+        await consume("c" * 32, "default")
+        self.assertEqual(received, [True, False])
+
     async def test_client_streams_through_service_api_and_clears_context(self):
         class Provider:
             async def stream(self, text, _history, _cancelled, session_id="", turn_id=""):

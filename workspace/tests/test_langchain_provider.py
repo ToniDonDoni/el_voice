@@ -24,6 +24,33 @@ from llm_service.search import SearchFailure, WebSearch, make_langchain_search_t
 
 @unittest.skipUnless(LANGCHAIN_AVAILABLE, "Install the pinned LangChain dependencies to run graph tests")
 class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_tool_is_registered_only_for_turns_that_enable_it(self):
+        captured = []
+
+        class Graph:
+            async def astream(self, *_args, **_kwargs):
+                if False:
+                    yield None
+
+        async def consume(search_enabled):
+            provider = object.__new__(OpenCodeLangChainProvider)
+            provider.model = object()
+            provider.search_tool = make_langchain_search_tool(WebSearch())
+            provider.tool_iterations = 3
+            with patch("langchain.agents.create_agent", side_effect=lambda **kwargs: (
+                captured.append(kwargs["tools"]) or Graph()
+            )):
+                events = [event async for event in provider.stream(
+                    "Answer briefly", [], asyncio.Event(), session_id="a" * 32,
+                    turn_id="b" * 32, search_enabled=search_enabled,
+                )]
+            self.assertEqual(events, [])
+
+        await consume(False)
+        await consume(True)
+        self.assertEqual([tool.name for tool in captured[0]], ["begin_final_answer"])
+        self.assertEqual([tool.name for tool in captured[1]], ["web_search", "begin_final_answer"])
+
     async def test_real_agent_runs_one_search_and_plans_from_bounded_history(self):
         class Model(FakeMessagesListChatModel):
             def __init__(self, *args, **kwargs):

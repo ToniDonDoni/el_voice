@@ -82,6 +82,10 @@ function harness() {
           const markup = html.match(/<input[^>]*id="interrupt-toggle"[^>]*>/)?.[0] || "";
           element.checked = /\bchecked\b/.test(markup);
         }
+        if (selector === "#web-search-toggle") {
+          const markup = html.match(/<input[^>]*id="web-search-toggle"[^>]*>/)?.[0] || "";
+          element.checked = /\bchecked\b/.test(markup);
+        }
         elements.set(selector, element);
       }
       return elements.get(selector);
@@ -441,6 +445,26 @@ async function run() {
     });
     assert.equal(JSON.parse(reconnect.sent[0]).interrupt_enabled, false,
       "a reconnect must preserve the current unchecked preference");
+    await api.stopSession(false);
+  });
+
+  await check("web search preference defaults off and updates the active socket", async () => {
+    const markup = html.match(/<input[^>]*id="web-search-toggle"[^>]*>/)?.[0];
+    assert.ok(markup && /\btype="checkbox"/.test(markup) && !/\bchecked\b/.test(markup),
+      "the web-search checkbox must be visible and unchecked by default");
+    assert.match(html, /<label[^>]*for="web-search-toggle"[^>]*>[\s\S]*?Enable web search[\s\S]*?<\/label>/,
+      "the web-search preference must have an accessible visible label");
+
+    const { api, elements } = harness();
+    await api.connectSocket();
+    let ws = FakeWebSocket.instances.at(-1);
+    assert.equal(JSON.parse(ws.sent[0]).search_enabled, false,
+      "new sessions must disable web search by default");
+    const toggle = elements.get("#web-search-toggle");
+    assert.ok(toggle.listeners.has("change"), "the web-search checkbox must have a change handler");
+    toggle.checked = true;
+    toggle.listeners.get("change")({ currentTarget: toggle });
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "search_setting", enabled: true });
     await api.stopSession(false);
   });
 

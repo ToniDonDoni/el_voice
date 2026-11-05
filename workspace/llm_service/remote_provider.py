@@ -312,11 +312,15 @@ class OpenCodeLangChainProvider:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain.tools import tool
 
+        # Internal phase marker, not a user-facing tool: its result separates
+        # tool/planning output from final speech forwarded by agent_stream.py.
         @tool("begin_final_answer")
         def begin_final_answer() -> str:
             """Commit to answering the user; disables further search tools."""
             return "Answer the user's question now."
 
+        # Require a tool call until the final-answer marker is in the agent state.
+        # After it appears, disable tools so the next model call produces only final speech.
         @wrap_model_call
         async def gate_final_speech(request, handler):
             committed = any(

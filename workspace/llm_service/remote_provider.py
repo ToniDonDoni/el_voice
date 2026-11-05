@@ -312,6 +312,15 @@ class OpenCodeLangChainProvider:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain.tools import tool
 
+        # A planning model can emit text and only later decide to call a tool.
+        # Speaking that speculative text would leak intermediate agent output;
+        # waiting for the whole model step would delay the first TTS audio.
+        # This handoff marks the final answer: after its ToolMessage, tools are
+        # disabled and final text chunks can be spoken as soon as they arrive.
+        # It relies on model cooperation: the model might keep searching and
+        # never call begin_final_answer. The bounded agent run then fails, and
+        # the service replaces the answer with GENERATION_FALLBACK ("Я так качался").
+        # The extra handoff model step also adds latency before speech begins.
         @tool("begin_final_answer")
         def begin_final_answer() -> str:
             """Commit to answering the user; disables further search tools."""

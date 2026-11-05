@@ -1,36 +1,38 @@
 # SPEC-005: Local Target-Speaker Gating
 
 ## 1. Problem and Current State
-- Browser AudioWorklet sends 16 kHz mono PCM in 512-sample frames through `/ws/voice`.
-- `StreamingSileroVAD.accept()` in `workspace/voice_pipeline.py` detects any speech. `receive_audio()` in `workspace/app.py` uses it to open/end turns and trigger barge-in.
-- Continuous TV speech can open unwanted turns and prevent the silence timer from ending the user's utterance.
+- Browser AudioWorklet sends 16 kHz mono PCM in 512-sample frames over `/ws/voice`.
+- `StreamingSileroVAD` in `workspace/voice_pipeline.py` detects any speaker. `receive_audio()` in `workspace/app.py` uses it for turn boundaries and barge-in. Continuous TV speech can create false turns and prevent the end-of-utterance timeout.
+- `/ws/voice` currently accepts connections without an explicit WebSocket `Origin` check. Adding biometric-profile controls requires protecting that boundary.
 
 ## 2. Required State
-- A hold-to-record **Detect me** control registers the owner's voice. Recording starts on press and stops on release; only a successful enrollment replaces the previous profile. This creates a voice embedding, not a trained model.
-- The owner can explicitly enroll or remove permitted conversation partners. Only the owner and enabled, enrolled partners may open, extend, or interrupt a turn. TV and other voices must not reset the end-of-utterance timer.
-- The UI shows enrollment progress, active protection, errors, and a way to delete saved profiles. Before enrollment, existing VAD behavior remains available and the UI clearly says speaker filtering is off.
-- Models, speaker embeddings, and inference remain on the local Mac/Docker host in both Local and Remote Voice modes. No runtime downloads, API keys, cloud audio, or stored raw enrollment recordings. Filtering is not an authentication or source-separation guarantee.
+- Hold **Detect me** to capture an enrollment sample; release to create and save the owner's voice embedding locally. This is enrollment, not model training. Invalid or canceled samples never replace an existing profile.
+- The owner may explicitly enroll, enable, disable, or remove additional permitted speakers, with their consent. Only enrolled and enabled speakers open, extend, or interrupt speech turns. TV and unknown speakers cannot reset the owner's endpoint timer.
+- The UI displays capture progress, filtering status, and errors; profiles can be deleted. With no profile configured, legacy VAD is available with an explicit **filtering off** status. If enabled filtering fails or its profile is invalid, fail closed rather than silently accepting everyone.
+- Audio analysis and embeddings stay on the local Mac in both Local and Remote Voice; no speaker audio or biometric embedding goes to a remote provider. Existing Remote Voice disclosure of *recognized text* is unchanged. Never retain raw enrollment recordings or put embeddings in telemetry, responses, or Git.
+- Speaker filtering is a convenience feature, **not authentication or anti-spoofing**. Replayed/imitated voices and overlapping TV speech remain limitations.
 
 ## 3. Acceptance Criteria
-- [ ] **Detect me** works with pointer, touch, and keyboard hold/release; enrollment never triggers STT/LLM. Insufficient clean speech (target: at least 10 seconds), cancellation, and disconnect retain the old profile and report failure.
-- [ ] Successful enrollment enables filtering immediately; embeddings survive container/session restarts under ignored `/data`, and deletion removes them. Profiles and enrollment audio are never logged or sent remotely.
-- [ ] With TV speech only, no `speech_started`, STT, or barge-in occurs during a 10-minute playback test. A registered user speaking alone starts and completes a turn.
-- [ ] While TV speech continues, the registered user's completed utterance reaches STT within 1.2 seconds after they stop; unregistered speech cannot hold the turn open. Simultaneous TV speech may still contaminate the transcribed audio.
-- [ ] Explicitly enrolled and enabled guests can trigger turns; removing or disabling a guest revokes access. Other voices remain excluded.
-- [ ] On the target Apple Silicon Linux ARM64 CPU container, the speaker-scoring path keeps up with real time (p95 processing under 160 ms per 160 ms chunk for the owner profile), uses bounded buffering, and reports latency/false-activation metrics. Record measured values; do not assume performance.
-- [ ] Browser, WebSocket, gating/endpoint, persistence, offline startup, and existing barge-in/Local/Remote regressions are covered by deterministic tests and a real-microphone/TV check.
+- [ ] **Detect me** works on pointer/touch/keyboard hold and release. At least 10 seconds of usable enrollment speech are required; canceled, short, silent, or interrupted capture leaves the prior profile intact and produces a clear error. Enrollment bypasses STT, LLM, and TTS.
+- [ ] Owner and consented guest embeddings are created locally and persist across restart under ignored `/data`, with restricted directory/file permissions and atomic replacement. Deletion removes saved profiles and active allowlist entries. Profile bytes and enrollment PCM are never logged or exposed over APIs.
+- [ ] Ten minutes of TV-only test playback produces zero turns or barge-in events. A registered owner speaking alone produces a completed STT turn. A registered guest works only while enabled; an unknown speaker never starts a turn.
+- [ ] While TV continues talking, the registered user's turn closes within 1.2 seconds after their last speech; unregistered speech cannot extend it. Simultaneous TV speech may still pollute the resulting STT audio.
+- [ ] Speaker inference is local and offline after one-time model provisioning. Missing, tampered, or corrupt artifacts fail readiness/filtered speech closed, with **no implicit ModelScope download**, fallback-to-any-speaker, or raw-audio transmission.
+- [ ] WebSocket handshakes reject unexpected `Origin`; enrollment/profile control messages are validated, size/rate-limited, and unavailable to cross-origin pages. Only explicitly allowed local origins can manage profiles.
+- [ ] On the target Apple Silicon Linux ARM64 CPU container, p95 processing stays below 160 ms per 160 ms chunk with bounded queues; capture actual inference latency, false activations, and missed speech, then tune thresholds.
+- [ ] Deterministic browser/WebSocket/endpoint/persistence/security tests and real microphone + TV tests pass; Local/Remote Voice, cancellation, and barge-in regressions remain intact.
 
 ## 4. Analysis
-Silero ONNX VAD is still useful as a speech signal but cannot identify who spoke. Speaker identity must gate both turn onset and endpoint; checking identity only after transcription would leave the TV-induced hanging-turn problem intact. Existing 32 ms audio frames must be accumulated into 160 ms scoring chunks without blocking WebSocket reads. Multiple allowed speakers increase CPU work; keep the allowlist bounded and benchmark it.
+Silero ONNX VAD cannot distinguish a nearby user from a TV. Identity must affect both onset and endpoint; filtering only after STT leaves the hanging-turn problem intact. Existing 32 ms frames must be accumulated into 160 ms target-speaker chunks off the WebSocket receive loop. The upstream Nomo-PVAD wrapper automatically downloads ERes2NetV2 if its local checkpoint is missing; its `.pt` checkpoints require safe loading. The current Compose voice service already has no external network egress and uses read-only `/models`; preserve those protections.
 
 ## 5. Proposed Solution
-- Use [tuya/nomo-pvad](https://github.com/tuya/nomo-pvad), pinned to `release-1.1` (Apache-2.0). It performs streaming target-speaker VAD on 16 kHz PCM every 160 ms using an enrolled 192-dimensional embedding. Unlike Picovoice Eagle, it needs no license server or AccessKey.
-- Extend `models.json` and `tools/download_models.py` to prefetch and verify both the Nomo-PVAD checkpoint and its separate upstream ERes2NetV2 enrollment checkpoint, with pinned artifact revisions/checksums; verify availability before loading and pass explicit local model paths. Lock compatible CPU `torch`/`torchaudio` dependencies for Python 3.12 and Linux ARM64. Never permit ModelScope's implicit first-run download.
-- Add a shared model loader and per-session speaker scorer to `workspace/voice_pipeline.py`. Buffer five 512-sample frames per 160 ms score; score configured allowed profiles, combine by maximum probability, and use configurable hysteresis (initial start: two consecutive scores >= 0.75; end: 640 ms without accepted-speaker speech). Preserve pre-roll, minimum speech, maximum utterance length, and existing cancellation behavior. Silero alone must never extend a gated turn.
-- Extend `workspace/app.py` WebSocket control with begin/finish/cancel enrollment and profile status. Route enrollment audio away from normal turns, atomically save only embeddings under `/data` with restricted permissions, and apply revised profiles safely between audio chunks. Update `workspace/static/index.html`, `app.js`, and `app.css` with **Detect me**, optional allowed-speaker registration/removal, and feedback.
+- Adopt [tuya/nomo-pvad](https://github.com/tuya/nomo-pvad) **release-1.1** (Apache-2.0), pinned to source commit `cb828468d183424fd574984f00b3ffbcce0be9bc`. Its `weights/nomo_pvad.pt` SHA-256 is `0acf2f3e75409b172771663fd1bee31af2760dba4e25b1353d2c26726b6412d1`. It emits one target-speaker probability per 160 ms of 16 kHz PCM. Enrollment uses the separate full ERes2NetV2 checkpoint (`iic/speech_eres2netv2_sv_zh-cn_16k-common`) to create a 192-dimensional embedding.
+- Extend `models.json` and `tools/download_models.py`: pin an immutable ERes2NetV2 revision and verified hash as well as the Nomo asset; download both in setup mode, never at runtime. Use vetted, pinned source and compatible locked CPU `torch`/`torchaudio` dependencies. Reject missing files **before** constructing the upstream wrapper, force explicit local paths, use `torch.load(weights_only=True)`, and reject unverified artifacts. Do not enable SDK telemetry or model-execution downloads.
+- Add a shared model and per-session scorer in `workspace/voice_pipeline.py`, consuming five 512-sample frames per 160 ms. Accept the maximum probability across enabled profiles. Initial hysteresis: two consecutive scores >= 0.75 start speech; end after 640 ms without accepted-speaker speech. Preserve pre-roll, max utterance time, and cancellation. Silero-alone activity never extends a filtered turn; do not block the WebSocket receive loop during CPU inference.
+- Extend `workspace/app.py` with enrollment begin/end/cancel, profile status/delete/allowlist controls, strict WebSocket Origin validation, input bounds, and atomic restricted-permission embedding storage. Route enrollment frames outside the normal turn pipeline. Add **Detect me** and guest management to `workspace/static/index.html`, `app.js`, and `app.css`; surface profile/filtering state without returning embedding contents.
 
 ## 6. ToDo
-- [ ] Pin and verify both model assets and CPU dependencies; prove startup without internet.
-- [ ] Implement persistent enrollment, per-speaker scoring, and identity-aware turn boundaries.
-- [ ] Add the browser controls and WebSocket events.
-- [ ] Add deterministic and real-audio tests; benchmark CPU and tune thresholds on TV overlap.
+- [ ] Pin/checksum both model assets and locked dependencies; confirm offline startup and no egress.
+- [ ] Implement profile enrollment, restricted persistence, speaker-aware onset/endpoint, and failure handling.
+- [ ] Implement protected WebSocket controls and accessible browser UI.
+- [ ] Test permissions, origin rejection, malformed profiles/inputs, voice replay limits, and CPU/TV benchmarks.

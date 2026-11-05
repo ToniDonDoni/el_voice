@@ -392,19 +392,27 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             if delta.get("type") == "sources":
                 log_event("voice_llm_event_received", session_id=session.session_id,
                           turn_id=turn.turn_id, event_type="sources",
+                          tool_call_id=delta.get("tool_call_id"),
+                          tool_status=delta.get("status"),
+                          error_code=delta.get("error_code"),
                           source_count=len(delta.get("sources", [])))
                 await queue_event(session, {
                     "type": "sources", "turn_id": turn.turn_id,
                     "sources": delta.get("sources", [])[:5],
+                    "tool_call_id": delta.get("tool_call_id", ""),
+                    "status": delta.get("status", "success"),
+                    "error_code": delta.get("error_code"),
                 }, turn.turn_id)
                 continue
             if delta.get("type") == "tool_call":
                 log_event("voice_llm_event_received", session_id=session.session_id,
                           turn_id=turn.turn_id, event_type="tool_call",
+                          tool_call_id=delta.get("tool_call_id"),
                           result_count=min(5, max(0, int(delta.get("result_count", 0)))))
                 await queue_event(session, {
                     "type": "tool_call", "turn_id": turn.turn_id,
                     "name": delta.get("name", "web_search"),
+                    "tool_call_id": delta.get("tool_call_id", ""),
                     "result_count": min(5, max(0, int(delta.get("result_count", 0)))),
                 }, turn.turn_id)
                 continue

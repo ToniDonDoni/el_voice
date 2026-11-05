@@ -200,9 +200,13 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                         await queue.put(("event", {"type": "delta", "text": piece}))
                                 elif event_type == "sources":
                                     sources = event.get("sources", [])
-                                    await queue.put(("event", {"type": "sources", "sources": sources[:5]}))
+                                    await queue.put(("event", {"type": "sources", "sources": sources[:5],
+                                                               "tool_call_id": event.get("tool_call_id", ""),
+                                                               "status": event.get("status", "success"),
+                                                               "error_code": event.get("error_code")}))
                                 elif event_type == "tool_call":
                                     await queue.put(("event", {"type": "tool_call", "name": "web_search",
+                                                                 "tool_call_id": event.get("tool_call_id", ""),
                                                                  "result_count": min(5, max(0, int(event.get("result_count", 0))))}))
                         if not cancelled.is_set() and reply_parts:
                             current.contexts.remember(state, request.text, "".join(reply_parts))
@@ -265,7 +269,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         try:
                             kind, event = await asyncio.wait_for(queue.get(), timeout=0.1)
                         except asyncio.TimeoutError:
-                            if producer_finished.is_set():
+                            # The producer may finish while buffered events remain.
+                            # Never discard a terminal "done" queued during a burst.
+                            if producer_finished.is_set() and queue.empty():
                                 break
                             continue
                         event.setdefault("timestamp", utc_timestamp())
@@ -276,6 +282,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                                        turn_id=turn_id, trace_id=trace_id,
                                        event_index=stream_event_index,
                                        event_type=event.get("type"),
+                                       tool_call_id=event.get("tool_call_id"),
+                                       tool_status=event.get("status"),
+                                       error_code=event.get("error_code"),
                                        text_chars=len(event.get("text", ""))
                                        if isinstance(event.get("text"), str) else 0)
                         yield (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode()

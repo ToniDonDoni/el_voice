@@ -1,0 +1,68 @@
+name: Model-free PR checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-contracts:
+    name: Python model-free contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.in
+      - name: Install lightweight app and agent dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            'fastapi==0.162.0' 'httpx==0.28.1' 'numpy==2.5.4' \
+            'langchain==1.4.8' 'langchain-openai==1.7.3' \
+            'ddgs==9.16.1' 'tiktoken==0.14.0' 'websockets==17.4' 'uvicorn==0.54.0'
+          python -m pip check
+      - name: Syntax check
+        run: python -m compileall -q workspace
+      - name: Run model-free Python contract tests (exclude model-asset integration)
+        env:
+          PYTHONPATH: workspace
+          OPENCODE_GO_API_KEY: ''
+        run: |
+          PYTHONPATH=workspace:workspace/tests python -m unittest -v \
+            test_agent_stream \
+            test_langchain_provider \
+            test_llm_client \
+            test_llm_service_stream_cleanup \
+            test_remote_provider_request_headers \
+            test_remote_voice \
+            test_review_pipeline.SpeakableResponseTests \
+            test_review_pipeline.LogPrivacyTests \
+            test_review_pipeline.AudioPacketTests \
+            test_review_pipeline.TurnRegressionTests \
+            test_review_pipeline.RuntimeInferenceLockTests \
+            test_review_pipeline.WebSocketCleanupTests \
+            test_review_pipeline.WebSocketConversationTests \
+            test_review_pipeline.BrowserAudioBackpressureTests \
+            test_review_pipeline.PlaybackAcknowledgementTests
+
+  browser-contracts:
+    name: Browser JavaScript contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run model-free browser and audio tests
+        run: node --test workspace/tests/*.test.cjs

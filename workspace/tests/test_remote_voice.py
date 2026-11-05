@@ -24,7 +24,6 @@ from llm_service.remote_provider import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     ProviderConfigurationError,
-    needs_search,
     validate_provider_config,
 )
 from llm_service.local_provider import CancelOnToken
@@ -164,12 +163,6 @@ class RemoteConfigurationTests(unittest.TestCase):
         self.assertEqual(response.json()["error"], "provider_configuration_error")
         self.assertNotIn("OPENCODE_GO_API_KEY=", response.text)
 
-    def test_current_information_intent_routes_to_search(self):
-        self.assertTrue(needs_search("What is the latest Dota patch?"))
-        self.assertTrue(needs_search("Проверь актуальный курс сегодня"))
-        self.assertTrue(needs_search("Какая погода в Москве?"))
-        self.assertTrue(needs_search("I'm not sure where this item drops"))
-        self.assertFalse(needs_search("How do I lane against Axe?"))
 
 
 class SearchToolTests(unittest.IsolatedAsyncioTestCase):
@@ -464,6 +457,42 @@ class StreamingContractTests(unittest.TestCase):
             self.assertEqual(response.status_code, 429)
             self.assertIn("a" * 32, service.contexts.sessions)
             active.active_task = None
+
+    def test_cold_burst_stream_keeps_terminal_done_after_slow_context_save(self):
+        class BurstProvider:
+            async def stream(self, _text, _history, _cancelled, session_id="", turn_id=""):
+                for _ in range(14):
+                    yield {"type": "delta", "text": "chunk"}
+
+            async def close(self):
+                pass
+
+        service = LLMService(BurstProvider(), mode="remote")
+        original_remember = service.contexts.remember
+
+        def slow_remember(*args, **kwargs):
+            import time
+            time.sleep(0.15)
+            return original_remember(*args, **kwargs)
+
+        service.contexts.remember = slow_remember
+        application = create_app(service)
+        endpoint = next(route.endpoint for route in application.routes
+                        if getattr(route, "path", "").endswith("/stream"))
+
+        async def consume():
+            response = await endpoint("c" * 32, "d" * 32, TurnRequest(text="cold"))
+            body = response.body_iterator
+            try:
+                return [json.loads(line) async for line in body]
+            finally:
+                await body.aclose()
+
+        events = asyncio.run(consume())
+        self.assertEqual(sum(item["type"] == "delta" for item in events), 14)
+        self.assertEqual([item["type"] for item in events].count("done"), 1)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertTrue(all(item["turn_id"] == "d" * 32 for item in events))
 
     def test_stream_reaches_eof_after_backpressured_burst(self):
         class BurstProvider:

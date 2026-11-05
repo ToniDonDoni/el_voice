@@ -4,3 +4,4 @@
 - [ ] [Review the SPEC-002 implementation and complete remaining acceptance evidence](SPEC-002-REMOTE-VOICE-LLM-SERVICE-REVIEW.md).
 - [ ] [Replace regex search routing with LLM-driven tool calling](SPEC-003-LLM-DRIVEN-TOOL-CALLING.md).
 - [ ] [Add an opt-in Remote Voice web-search control](SPEC-004-REMOTE-WEB-SEARCH-TOGGLE.md).
+- [ ] [Add local target-speaker gating with voice enrollment](SPEC-005-LOCAL-TARGET-SPEAKER-GATING.md).

@@ -119,8 +119,10 @@ async def stream_agent(
                 if not isinstance(metadata, dict) or metadata.get("langgraph_node") != "model":
                     continue
                 if not answer_committed:
-                    # Product rule: never send planning text or tool-call preambles to chat/TTS.
-                    # Forward model text only after begin_final_answer commits to the final response.
+                    # begin_final_answer is the reliable boundary that lets us stream final
+                    # chunks immediately. Before it, discard planning/tool-call text; without
+                    # this marker we would have to buffer each full model response to prove
+                    # no tool call followed, delaying the user's answer.
                     continue
                 if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
                     raise RuntimeError("provider_tool_loop_failed")

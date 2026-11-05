@@ -64,6 +64,12 @@ Voice interrupts with `POST /v1/sessions/{session_id}/turns/{turn_id}/cancel`; e
 | FastAPI WebSocket app and browser AudioWorklet | Continuous microphone streaming and incremental playback |
 | Nginx unprivileged proxy | Loopback browser endpoint and WebSocket forwarding |
 
+## Local speaker filter
+
+The optional speaker filter uses **Nomo-PVAD release 1.1** with an **ERes2NetV2** speaker-embedding model. It compares short microphone audio windows with the locally enrolled voice profile. Only a matching enrolled voice can start or extend a voice turn; TV and other unregistered voices are normally ignored. Audio and profiles stay on this device in both voice modes. This is speaker filtering, not authentication: overlapping speech or a recording that sounds like the enrolled voice may still pass.
+
+To enroll, select **My voice**, then hold **Hold to detect speaker** while speaking clearly. Release after the recorded-audio counter reaches 10 seconds; at least 2 seconds must contain speech detected by local VAD. Then enable **Only accept enrolled speakers** and start or reconnect the voice session. The filter is off by default. To add a guest, select **Consenting guest** and confirm their consent before enrollment.
+
 The VAD uses the dependency already present in the locked image; no new package or model download is required. Its thresholds and endpoint timings are configured in `workspace/settings.json`.
 
 ## Prepare and start

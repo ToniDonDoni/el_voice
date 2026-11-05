@@ -220,7 +220,7 @@ function beginSpeakerEnrollment() {
     return;
   }
   detectSpeakerButton.textContent = "Release to save · Cancel to discard";
-  speakerFilterStatus.textContent = "Keep speaking clearly until the counter reaches 10.0 seconds; release to save. Pauses do not count.";
+  speakerFilterStatus.textContent = "Recording starts now. Keep speaking while holding; release after 10 seconds recorded. Speech detection is shown separately.";
 }
 
 speakerEnrollmentKind.addEventListener("change", () => {
@@ -394,8 +394,10 @@ async function handleServerMessage(data) {
       break;
     case "speaker_enrollment":
       if (event.state === "capturing") {
-        const seconds = Number(event.speech_seconds || 0);
-        speakerFilterStatus.textContent = `Enrollment speech: ${seconds.toFixed(1)} / 10 seconds`;
+        const recorded = Number(event.recorded_seconds || 0);
+        const speech = Number(event.speech_seconds || 0);
+        const elapsed = Number(event.elapsed_seconds || 0);
+        speakerFilterStatus.textContent = `Recorded: ${recorded.toFixed(1)} / 10.0 seconds (held ${elapsed.toFixed(1)} seconds); speech detected: ${speech.toFixed(1)} seconds.`;
       } else if (event.state === "saved") {
         detectSpeakerButton.textContent = "Hold to detect speaker";
         speakerFilterToggle.checked = Boolean(event.filter_enabled);
@@ -412,6 +414,7 @@ async function handleServerMessage(data) {
       }
       break;
     case "speaker_error":
+      speakerEnrollmentHeld = false;
       detectSpeakerButton.textContent = "Hold to detect speaker";
       if (typeof event.enabled === "boolean") speakerFilterToggle.checked = event.enabled;
       speakerFilterStatus.textContent = event.message || "Speaker filtering error";

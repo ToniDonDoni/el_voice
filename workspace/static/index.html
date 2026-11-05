@@ -7,7 +7,7 @@
   <meta name="el-voice-csrf" content="__EL_VOICE_CSRF_TOKEN__">
   <title>EL Voice — Dota companion</title>
   <link rel="stylesheet" href="/static/app.css?v=speaker-filter-20261106">
-  <script src="/static/app.js?v=speaker-filter-enrollment-20261106" defer></script>
+  <script src="/static/app.js?v=speaker-enrollment-recording-20261106" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -78,7 +78,7 @@
           <input id="guest-consent" type="checkbox">
           <span>The guest has agreed to enroll and store their voice profile on this device.</span>
         </label>
-        <p id="speaker-enrollment-help">Hold while speaking clearly. Only speech detected by the local VAD counts; pauses do not. When the counter reaches 10 seconds, release to save. Enrollment stays on this device and is not sent to speech recognition or the language model.</p>
+        <p id="speaker-enrollment-help">Every microphone frame is recorded while you hold the button. Hold while speaking clearly and release after 10 seconds recorded. Speech detected by the local VAD is shown separately; samples with less than 2 seconds of detected speech are rejected. Enrollment stays on this device and is not sent to speech recognition or the language model.</p>
         <ul id="speaker-profile-list" aria-label="Enrolled speaker profiles"></ul>
       </section>
       <div class="playback-controls" aria-label="Assistant playback volume">

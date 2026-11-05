@@ -450,8 +450,8 @@ async function run() {
   });
 
   await check("speaker enrollment stays held through a delayed sample and saves on release", async () => {
-    assert.match(html, /Only speech detected by the local VAD counts; pauses do not/,
-      "the enrollment help must explain why holding through silence does not advance the counter");
+    assert.match(html, /Every microphone frame is recorded while you hold the button/,
+      "enrollment help must say that the recorded duration follows the held capture");
     const { api, elements } = harness();
     const socket = new FakeWebSocket();
     api.setAudio(new FakeAudioContext(), socket);
@@ -472,9 +472,10 @@ async function run() {
     }, "pressing and holding must start enrollment once");
 
     await api.handleServerMessage(JSON.stringify({
-      type: "speaker_enrollment", state: "capturing", speech_seconds: 9.2,
+      type: "speaker_enrollment", state: "capturing", recorded_seconds: 9.2,
+      speech_seconds: 8.4, elapsed_seconds: 12,
     }));
-    assert.match(elements.get("#speaker-filter-status").textContent, /9\.2 \/ 10 seconds/);
+    assert.match(elements.get("#speaker-filter-status").textContent, /Recorded: 9\.2 \/ 10\.0 seconds \(held 12\.0 seconds\); speech detected: 8\.4 seconds/);
 
     // Keep the real pointer hold active across a ten-second capture window.
     await new Promise(resolve => setTimeout(resolve, 10_000));
@@ -482,7 +483,8 @@ async function run() {
       "the browser must not end enrollment while the pointer is still held");
 
     await api.handleServerMessage(JSON.stringify({
-      type: "speaker_enrollment", state: "capturing", speech_seconds: 10,
+      type: "speaker_enrollment", state: "capturing", recorded_seconds: 10,
+      speech_seconds: 9.2, elapsed_seconds: 12.8,
     }));
     button.listeners.get("pointerup")();
     assert.deepEqual(JSON.parse(socket.sent.at(-1)), { type: "speaker_enrollment_end" },

@@ -99,7 +99,8 @@ def _validate_settings(settings: dict[str, Any]) -> None:
             raise ValueError(f"speaker.{key} is out of range")
     for key, low, high in (("start_chunks", 1, 10), ("endpoint_silence_ms", 160, 2400),
                            ("max_queue_frames", 5, 128), ("max_frame_age_ms", 160, 5000),
-                           ("enrollment_min_speech_seconds", 10, 60),
+                           ("enrollment_min_recording_seconds", 10, 60),
+                           ("enrollment_min_detected_speech_seconds", 1, 10),
                            ("enrollment_max_seconds", 10, 120)):
         integer("speaker", key, low, high)
     if speaker["release_threshold"] > speaker["start_threshold"]:

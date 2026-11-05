@@ -6,14 +6,14 @@
 - `/ws/voice` currently accepts connections without an explicit WebSocket `Origin` check. Adding biometric-profile controls requires protecting that boundary.
 
 ## 2. Required State
-- Hold **Detect me** to capture an enrollment sample; release to create and save the owner's voice embedding locally. This is enrollment, not model training. Invalid or canceled samples never replace an existing profile.
+- Hold **Detect me** to capture the complete microphone stream; release to create and save the owner's voice embedding locally. The recording clock advances for every received audio frame, while VAD speech time is shown separately and only rejects effectively silent samples. Enrollment can interrupt an ordinary detected-speech turn and can replace an existing profile. This is enrollment, not model training. Invalid or canceled samples never replace an existing profile.
 - The owner may explicitly enroll, enable, disable, or remove additional permitted speakers, with their consent. Only enrolled and enabled speakers open, extend, or interrupt speech turns. TV and unknown speakers cannot reset the owner's endpoint timer.
 - The UI displays capture progress, filtering status, and errors; profiles can be deleted. With no profile configured, legacy VAD is available with an explicit **filtering off** status. If enabled filtering fails or its profile is invalid, fail closed rather than silently accepting everyone.
 - Audio analysis and embeddings stay on the local Mac in both Local and Remote Voice; no speaker audio or biometric embedding goes to a remote provider. Existing Remote Voice disclosure of *recognized text* is unchanged. Never retain raw enrollment recordings or put embeddings in telemetry, responses, or Git.
 - Speaker filtering is a convenience feature, **not authentication or anti-spoofing**. Replayed/imitated voices and overlapping TV speech remain limitations.
 
 ## 3. Acceptance Criteria
-- [ ] **Detect me** works on pointer/touch/keyboard hold and release. At least 10 seconds of usable enrollment speech are required; canceled, short, silent, or interrupted capture leaves the prior profile intact and produces a clear error. Enrollment bypasses STT, LLM, and TTS.
+- [ ] **Detect me** works on pointer/touch/keyboard hold and release. Every received microphone frame while held is recorded; at least 10 seconds of recording and 2 seconds of VAD-detected speech are required. Canceled, short, silent, or interrupted capture leaves the prior profile intact and produces a clear error. Enrollment bypasses STT, LLM, and TTS.
 - [ ] Owner and consented guest embeddings are created locally and persist across restart under ignored `/data`, with restricted directory/file permissions and atomic replacement. Deletion removes saved profiles and active allowlist entries. Profile bytes and enrollment PCM are never logged or exposed over APIs.
 - [ ] Ten minutes of TV-only test playback produces zero turns or barge-in events. A registered owner speaking alone produces a completed STT turn. A registered guest works only while enabled; an unknown speaker never starts a turn.
 - [ ] While TV continues talking, the registered user's turn closes within 1.2 seconds after their last speech; unregistered speech cannot extend it. Simultaneous TV speech may still pollute the resulting STT audio.
@@ -39,8 +39,8 @@ Silero ONNX VAD cannot distinguish a nearby user from a TV. Identity must affect
 
 ## 7. Implementation Verification
 - Linux ARM64 image build, dependency check, Compose validation, pinned speaker-asset verification, and offline model startup passed.
-- Python unittest discovery passed (88 tests); Node browser/audio tests passed (2 test files).
-- Delayed enrollment integration checks passed: a simulated browser pointer stays held through a 10-second delay, and the ARM64 voice service persists a profile after receiving 10.24 seconds of VAD-approved speech.
+- Before the enrollment follow-up, Python unittest discovery passed (88 tests) and Node browser/audio tests passed (2 test files). After the follow-up, the targeted ARM64 speaker-security tests passed (3 tests) and the browser playback test passed (1 test).
+- Enrollment now logs button press/release and emits a half-second progress heartbeat independent of audio arrival. The targeted ARM64 test verified active-turn preemption, re-enrollment while filtering is enabled, full-frame recording with interspersed VAD-negative frames, and profile persistence. The browser test verifies delayed hold and distinct recorded/speech counters.
 - The real local STT -> Gemma -> TTS self-test passed. Synthetic WebSocket enrollment, profile enable/delete, and Nomo target/background examples were exercised without retaining sample audio or the temporary profile.
 - The labeled Nomo example produced one accepted target-speaker turn and no turn for the background-only segment. This is synthetic evidence, not a microphone/television acceptance test.
 - Latency remains unaccepted: the live status p95 was 166 ms in an unknown-only sample and rose above 400 ms while an accepted sample also exercised STT/LLM/TTS. One full-rate mixed sample emitted a bounded-queue fail-closed event; slower synthetic playback did not. Continue ARM64 CPU and threshold tuning before claiming the 160 ms criterion.

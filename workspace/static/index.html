@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css?v=revision-badge-fixed-20261104">
-  <script src="/static/app.js?v=revision-badge-fixed-20261104" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=web-search-toggle-20261105">
+  <script src="/static/app.js?v=web-search-toggle-20261105" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -50,6 +50,13 @@
           <span>Interrupt assistant when I speak</span>
         </label>
         <p id="interrupt-help">When off, speech during an active reply is ignored; ask again after it finishes.</p>
+      </div>
+      <div id="web-search-control" class="interrupt-control" hidden>
+        <label for="web-search-toggle">
+          <input id="web-search-toggle" type="checkbox">
+          <span>Enable web search</span>
+        </label>
+        <p>When enabled, Remote Voice can search the public web for current information.</p>
       </div>
       <div class="playback-controls" aria-label="Assistant playback volume">
         <button id="mute-button" class="text-button" type="button" aria-pressed="false">Mute</button>

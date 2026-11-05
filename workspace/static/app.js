@@ -3,6 +3,8 @@ const startButton = document.querySelector("#start-button");
 const stopButton = document.querySelector("#stop-button");
 const clearButton = document.querySelector("#clear-button");
 const interruptToggle = document.querySelector("#interrupt-toggle");
+const webSearchToggle = document.querySelector("#web-search-toggle");
+const webSearchControl = document.querySelector("#web-search-control");
 const statusDot = document.querySelector("#status-dot");
 const statusLabel = document.querySelector("#status-label");
 const messages = document.querySelector("#messages");
@@ -291,11 +293,17 @@ async function handleServerMessage(data) {
       if (typeof event.interrupt_enabled === "boolean") {
         interruptToggle.checked = event.interrupt_enabled;
       }
+      if (typeof event.search_enabled === "boolean") {
+        webSearchToggle.checked = event.search_enabled;
+      }
       setStatus("Listening for your next question", "ready");
       liveLabel.textContent = "LISTENING";
       break;
     case "interrupt_setting":
       if (typeof event.enabled === "boolean") interruptToggle.checked = event.enabled;
+      break;
+    case "search_setting":
+      if (typeof event.enabled === "boolean") webSearchToggle.checked = event.enabled;
       break;
     case "not_ready":
       setStatus("Local models are still loading", "busy");
@@ -428,6 +436,7 @@ function connectSocket() {
         type: "start",
         sample_rate: TARGET_RATE,
         interrupt_enabled: interruptToggle.checked,
+        search_enabled: webSearchToggle.checked,
         echo_cancellation: track?.getSettings?.().echoCancellation ?? null,
       }));
       resolve();
@@ -553,6 +562,7 @@ async function stopSession(userInitiated = true) {
   stopButton.hidden = true;
   startButton.hidden = false;
   startButton.disabled = false;
+  webSearchToggle.checked = false;
   liveLabel.textContent = "MIC OFF";
   vadIndicator.classList.remove("active");
   if (userInitiated) setStatus("Session ended", "");
@@ -617,6 +627,13 @@ interruptToggle.addEventListener("change", event => {
     }));
   }
 });
+webSearchToggle.addEventListener("change", event => {
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({
+      type: "search_setting", enabled: event.currentTarget.checked,
+    }));
+  }
+});
 
 function formatMetric(metric) {
   if (!metric || metric.p50 == null) return "not measured";
@@ -645,6 +662,7 @@ async function pollStatus() {
     renderBuildRevision(status.revision);
     renderDiagnostics(status);
     const remote = status.mode === "remote";
+    webSearchControl.hidden = !remote;
     const badge = document.querySelector("#mode-badge");
     badge.replaceChildren(Object.assign(document.createElement("span"), { className: "local-dot" }));
     badge.append(document.createTextNode(remote ? "REMOTE · TEXT SHARED" : "LOCAL · PRIVATE"));

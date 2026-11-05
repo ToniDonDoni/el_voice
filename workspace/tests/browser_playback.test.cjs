@@ -72,7 +72,7 @@ const appSource = fs.readFileSync(new URL("../static/app.js", `file://${__filena
 const html = fs.readFileSync(new URL("../static/index.html", `file://${__filename}`), "utf8");
 const failures = [];
 
-function harness() {
+function harness(mode = "local") {
   const elements = new Map();
   const document = {
     querySelector(selector) {
@@ -80,6 +80,10 @@ function harness() {
         const element = new Element();
         if (selector === "#interrupt-toggle") {
           const markup = html.match(/<input[^>]*id="interrupt-toggle"[^>]*>/)?.[0] || "";
+          element.checked = /\bchecked\b/.test(markup);
+        }
+        if (selector === "#web-search-toggle") {
+          const markup = html.match(/<input[^>]*id="web-search-toggle"[^>]*>/)?.[0] || "";
           element.checked = /\bchecked\b/.test(markup);
         }
         elements.set(selector, element);
@@ -100,6 +104,7 @@ window.__elVoiceTest = {
   reportClientError,
   renderDiagnostics,
   renderBuildRevision,
+  pollStatus,
   setSessionWanted(value) { sessionWanted = value; },
   getQueueEnd(turnId) { return nextPlaybackTime.get(turnId) || 0; },
   getAssistantText(turnId) { return messageNodes.get("assistant:" + turnId)?.body.textContent || ""; },
@@ -107,7 +112,7 @@ window.__elVoiceTest = {
   vm.runInNewContext(source, {
     document, window, WebSocket: FakeWebSocket, AudioContext: FakeAudioContext,
     location: { protocol: "http:", host: "localhost" },
-    fetch: async () => ({ json: async () => ({ ready: true, stage: "ready", models: {}, metrics: {},
+    fetch: async () => ({ json: async () => ({ ready: true, stage: "ready", mode, models: {}, metrics: {},
       audio: { max_buffered_audio_ms: 2000 } }) }),
     setInterval() {}, setTimeout, console, URL, ArrayBuffer, Int16Array, Map, Set, Math, Promise,
   });
@@ -442,6 +447,37 @@ async function run() {
     assert.equal(JSON.parse(reconnect.sent[0]).interrupt_enabled, false,
       "a reconnect must preserve the current unchecked preference");
     await api.stopSession(false);
+  });
+
+  await check("web search preference defaults off and updates the active socket", async () => {
+    const markup = html.match(/<input[^>]*id="web-search-toggle"[^>]*>/)?.[0];
+    assert.ok(markup && /\btype="checkbox"/.test(markup) && !/\bchecked\b/.test(markup),
+      "the web-search checkbox must be visible and unchecked by default");
+    assert.match(html, /<label[^>]*for="web-search-toggle"[^>]*>[\s\S]*?Enable web search[\s\S]*?<\/label>/,
+      "the web-search preference must have an accessible visible label");
+
+    const { api, elements } = harness();
+    await api.pollStatus();
+    assert.equal(elements.get("#web-search-control").hidden, true,
+      "web search must be hidden in Local Voice mode");
+    await api.connectSocket();
+    let ws = FakeWebSocket.instances.at(-1);
+    assert.equal(JSON.parse(ws.sent[0]).search_enabled, false,
+      "new sessions must disable web search by default");
+    const toggle = elements.get("#web-search-toggle");
+    assert.ok(toggle.listeners.has("change"), "the web-search checkbox must have a change handler");
+    toggle.checked = true;
+    toggle.listeners.get("change")({ currentTarget: toggle });
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "search_setting", enabled: true });
+    await api.handleServerMessage(JSON.stringify({ type: "search_setting", enabled: true }));
+    assert.equal(toggle.checked, true, "the server acknowledgement must update the checkbox");
+    await api.stopSession(false);
+    assert.equal(toggle.checked, false, "ending a session must reset the preference for the next session");
+
+    const remote = harness("remote");
+    await remote.api.pollStatus();
+    assert.equal(remote.elements.get("#web-search-control").hidden, false,
+      "web search must be visible in Remote Voice mode");
   });
 
   await check("audio buffering diagnostics and browser error reporting are visible", async () => {

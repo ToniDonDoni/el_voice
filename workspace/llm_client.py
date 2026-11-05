@@ -55,7 +55,8 @@ class LLMServiceClient:
         raise LLMServiceError(last_error)
 
     async def stream(self, session_id: str, turn_id: str, text: str,
-                     cancel_event: threading.Event) -> AsyncIterator[dict[str, Any]]:
+                     cancel_event: threading.Event,
+                     search_enabled: bool = False) -> AsyncIterator[dict[str, Any]]:
         import httpx
 
         endpoint = f"{self.base_url}/v1/sessions/{session_id}/turns/{turn_id}/stream"
@@ -68,7 +69,8 @@ class LLMServiceClient:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
             try:
                 async with client.stream(
-                    "POST", endpoint, json={"text": text, "trace_id": turn_id},
+                    "POST", endpoint, json={"text": text, "trace_id": turn_id,
+                                             "search_enabled": search_enabled},
                 ) as response:
                     log_structured(logger, "llm_client_response_headers", session_id=session_id,
                                    turn_id=turn_id, trace_id=turn_id,

@@ -129,9 +129,11 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
         service = LLMService(provider, mode="remote")
         app = create_app(service)
 
-        def post_turn(client: TestClient, session_id: str, turn_id: str, text: str) -> list[dict]:
+        def post_turn(client: TestClient, session_id: str, turn_id: str, text: str,
+                      search_enabled: bool = False) -> list[dict]:
             response = client.post(
-                f"/v1/sessions/{session_id}/turns/{turn_id}/stream", json={"text": text}
+                f"/v1/sessions/{session_id}/turns/{turn_id}/stream",
+                json={"text": text, "search_enabled": search_enabled},
             )
             self.assertEqual(response.status_code, 200, response.text)
             return [json.loads(line) for line in response.iter_lines() if line]
@@ -142,7 +144,8 @@ class RemoteProviderRequestHeaderTests(unittest.TestCase):
                 first = post_turn(client, session_a, "1" * 32, "What role does Axe play?")
                 second = post_turn(client, session_a, "2" * 32, "And what does that role do?")
                 third = post_turn(client, session_b, "3" * 32, "Describe Axe briefly.")
-                searched = post_turn(client, session_c, "4" * 32, "Find the latest Dota patch notes.")
+                searched = post_turn(client, session_c, "4" * 32,
+                                     "Find the latest Dota patch notes.", search_enabled=True)
 
         self.assertEqual(first[-1]["type"], "done")
         self.assertEqual(second[-1]["type"], "done")

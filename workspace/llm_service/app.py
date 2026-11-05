@@ -12,7 +12,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from .context import ConversationStore
 from .local_provider import LocalGemmaProvider
@@ -33,6 +33,7 @@ GENERATION_FALLBACK = "Я так качался"
 class TurnRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_USER_TEXT_CHARS)
     trace_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+    search_enabled: StrictBool = False
 
 
 class BackendUnavailable(RuntimeError):
@@ -177,9 +178,11 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                     nonlocal provider_event_count, provider_delta_count
                     try:
                         history = current.contexts.trimmed_history(state.history)
+                        provider_options = {"session_id": session_id, "turn_id": trace_id}
+                        if current.mode == "remote" and request.search_enabled:
+                            provider_options["search_enabled"] = True
                         provider_stream = current.provider.stream(
-                            request.text, history, cancelled, session_id=session_id,
-                            turn_id=trace_id,
+                            request.text, history, cancelled, **provider_options,
                         )
                         async with aclosing(provider_stream):
                             async for event in provider_stream:

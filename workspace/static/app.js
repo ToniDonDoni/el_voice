@@ -220,7 +220,7 @@ function beginSpeakerEnrollment() {
     return;
   }
   detectSpeakerButton.textContent = "Release to save · Cancel to discard";
-  speakerFilterStatus.textContent = "Listening for enrollment speech. Keep speaking clearly for at least 10 seconds.";
+  speakerFilterStatus.textContent = "Keep speaking clearly until the counter reaches 10.0 seconds; release to save. Pauses do not count.";
 }
 
 speakerEnrollmentKind.addEventListener("change", () => {

@@ -39,7 +39,8 @@ Silero ONNX VAD cannot distinguish a nearby user from a TV. Identity must affect
 
 ## 7. Implementation Verification
 - Linux ARM64 image build, dependency check, Compose validation, pinned speaker-asset verification, and offline model startup passed.
-- Python unittest discovery passed (87 tests); Node browser/audio tests passed (2 tests).
+- Python unittest discovery passed (88 tests); Node browser/audio tests passed (2 test files).
+- Delayed enrollment integration checks passed: a simulated browser pointer stays held through a 10-second delay, and the ARM64 voice service persists a profile after receiving 10.24 seconds of VAD-approved speech.
 - The real local STT -> Gemma -> TTS self-test passed. Synthetic WebSocket enrollment, profile enable/delete, and Nomo target/background examples were exercised without retaining sample audio or the temporary profile.
 - The labeled Nomo example produced one accepted target-speaker turn and no turn for the background-only segment. This is synthetic evidence, not a microphone/television acceptance test.
 - Latency remains unaccepted: the live status p95 was 166 ms in an unknown-only sample and rose above 400 ms while an accepted sample also exercised STT/LLM/TTS. One full-rate mixed sample emitted a bounded-queue fail-closed event; slower synthetic playback did not. Continue ARM64 CPU and threshold tuning before claiming the 160 ms criterion.

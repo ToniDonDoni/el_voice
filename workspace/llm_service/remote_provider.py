@@ -321,6 +321,8 @@ class OpenCodeLangChainProvider:
 
         # Require a tool call until the final-answer marker is in the agent state.
         # After it appears, disable tools so the next model call produces only final speech.
+        # stream_agent requires this marker before releasing text; if it never arrives,
+        # the turn raises provider_tool_loop_failed instead of exposing planning text.
         @wrap_model_call
         async def gate_final_speech(request, handler):
             committed = any(

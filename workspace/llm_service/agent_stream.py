@@ -146,8 +146,8 @@ async def stream_agent(
                         yield {"type": "delta", "text": _text(response)}
                     continue
                 if not calls:
-                    # A planning step must explicitly enter final-answer mode.
-                    # Never speak a possible tool-call preamble.
+                    # This protocol requires begin_final_answer. A direct-text reply
+                    # fails the turn so planning text never reaches chat or TTS.
                     raise RuntimeError("provider_tool_loop_failed")
                 if any(call.get("name") == "begin_final_answer" for call in calls) and len(calls) != 1:
                     raise RuntimeError("provider_tool_loop_failed")
@@ -196,6 +196,8 @@ async def stream_agent(
                     yield {"type": "sources", "sources": list(all_sources),
                            "tool_call_id": call_id, "status": status,
                            "error_code": error_code}
+    # The marker and a subsequent final model response are required for success.
+    # If either is missing, fail the turn rather than expose pre-final text or go silent.
     if not cancelled.is_set() and not final_model_completed:
         raise RuntimeError("provider_tool_loop_failed")
     if not cancelled.is_set() and (not answer_committed or not answer_emitted):

@@ -312,17 +312,18 @@ class OpenCodeLangChainProvider:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         from langchain.tools import tool
 
-        # Internal phase marker, not a user-facing tool: its result separates
-        # tool/planning output from final speech forwarded by agent_stream.py.
+        # Internal control tool, not user-facing: its result is a reliable boundary
+        # between tool-planning output and final speech. After it, agent_stream.py
+        # can forward final chunks immediately; without it, each model response would
+        # need buffering to ensure tool-call preambles are never spoken.
         @tool("begin_final_answer")
         def begin_final_answer() -> str:
             """Commit to answering the user; disables further search tools."""
             return "Answer the user's question now."
 
-        # Require a tool call until the final-answer marker is in the agent state.
-        # After it appears, disable tools so the next model call produces only final speech.
-        # stream_agent requires this marker before releasing text; if it never arrives,
-        # the turn raises provider_tool_loop_failed instead of exposing planning text.
+        # This adds a model step and relies on the model choosing this exact marker.
+        # "required" forces some tool call, not this marker; if it keeps searching or
+        # returns text directly, stream_agent fails the turn at its guard/iteration limit.
         @wrap_model_call
         async def gate_final_speech(request, handler):
             committed = any(

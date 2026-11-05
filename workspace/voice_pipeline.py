@@ -208,6 +208,7 @@ class StreamingSileroVAD:
 @dataclass
 class Turn:
     turn_id: str
+    search_enabled: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event)
     speech_onset_at: float = field(default_factory=time.monotonic)
     speech_end_at: float | None = None
@@ -336,9 +337,11 @@ class VoiceRuntime:
         history: list[dict[str, str]],
         session_id: str = "",
         turn_id: str = "",
+        search_enabled: bool = False,
     ) -> Any:
         async for event in self.llm_client.stream(
-            session_id, turn_id, user_text, cancel_event
+            session_id, turn_id, user_text, cancel_event,
+            search_enabled=search_enabled,
         ):
             yield event
 

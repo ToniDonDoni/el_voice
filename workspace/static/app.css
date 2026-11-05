@@ -104,6 +104,7 @@ h1 span { color: #75837f; }
 @keyframes pulse { to { transform: scaleY(.45); opacity: .55; } }
 .live-label { color: #697672; font-size: 9px; }
 .interrupt-control { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 4px 14px; border-top: 1px solid var(--line); padding: 11px 18px 12px; }
+.interrupt-control[hidden] { display: none; }
 .interrupt-control label { display: inline-flex; align-items: center; gap: 8px; color: #c2d0ca; font-size: 11px; cursor: pointer; }
 .interrupt-control input { width: 15px; height: 15px; margin: 0; accent-color: var(--mint); }
 .interrupt-control p { flex-basis: 100%; margin: 0 0 0 23px; color: #77847f; font-size: 10px; line-height: 1.45; }

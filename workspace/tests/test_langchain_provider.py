@@ -27,10 +27,9 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
     async def test_search_tool_is_registered_only_for_turns_that_enable_it(self):
         captured = []
 
-        class Graph:
-            async def astream(self, *_args, **_kwargs):
-                if False:
-                    yield None
+        async def empty_stream(*_args, **_kwargs):
+            if False:
+                yield None
 
         async def consume(search_enabled):
             provider = object.__new__(OpenCodeLangChainProvider)
@@ -38,8 +37,8 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
             provider.search_tool = make_langchain_search_tool(WebSearch())
             provider.tool_iterations = 3
             with patch("langchain.agents.create_agent", side_effect=lambda **kwargs: (
-                captured.append(kwargs["tools"]) or Graph()
-            )):
+                captured.append(kwargs["tools"]) or object()
+            )), patch("llm_service.remote_provider.stream_agent", side_effect=empty_stream):
                 events = [event async for event in provider.stream(
                     "Answer briefly", [], asyncio.Event(), session_id="a" * 32,
                     turn_id="b" * 32, search_enabled=search_enabled,
@@ -90,7 +89,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
 
         events = [event async for event in provider.stream(
             "Find a current guide for that item", history, asyncio.Event(),
-            session_id="a" * 32,
+            session_id="a" * 32, search_enabled=True,
         )]
 
         self.assertEqual([event["type"] for event in events], ["tool_call", "sources", "delta"])
@@ -139,7 +138,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         provider.tool_iterations = 3
         generator = provider.stream(
             "Explain one thing briefly", [], asyncio.Event(),
-            session_id="a" * 32, turn_id="b" * 32,
+            session_id="a" * 32, turn_id="b" * 32, search_enabled=True,
         )
         try:
             first = await asyncio.wait_for(anext(generator), timeout=3.0)
@@ -235,7 +234,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             response = client.post(
                 f"/v1/sessions/{'a' * 32}/turns/{'b' * 32}/stream",
-                json={"text": "latest Dota patch"},
+                json={"text": "latest Dota patch", "search_enabled": True},
             )
         events = [json.loads(line) for line in response.iter_lines() if line]
         self.assertEqual([event["type"] for event in events],
@@ -291,7 +290,7 @@ class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             response = client.post(
                 f"/v1/sessions/{'a' * 32}/turns/{'b' * 32}/stream",
-                json={"text": "Check two pieces of information"},
+                json={"text": "Check two pieces of information", "search_enabled": True},
             )
         events = [json.loads(line) for line in response.iter_lines() if line]
         self.assertEqual(events[-1]["type"], "done")

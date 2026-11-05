@@ -22,13 +22,26 @@ class WebSearchPreferenceTests(unittest.IsolatedAsyncioTestCase):
         session = app.VoiceSession("session", None, None)
         self.assertFalse(session.search_enabled)
 
-        await app.receive_control(session, json.dumps({
-            "type": "search_setting", "enabled": True,
-        }))
+        with patch.object(app, "runtime", SimpleNamespace(mode="remote")):
+            await app.receive_control(session, json.dumps({
+                "type": "search_setting", "enabled": True,
+            }))
 
         self.assertTrue(session.search_enabled)
         acknowledgement = session.outgoing.get_nowait().event
-        self.assertEqual(acknowledgement, {"type": "search_setting", "enabled": True})
+        self.assertEqual((acknowledgement["type"], acknowledgement["enabled"]),
+                         ("search_setting", True))
+
+    async def test_local_mode_rejects_search_preference_changes(self):
+        session = app.VoiceSession("session", None, None)
+        with patch.object(app, "runtime", SimpleNamespace(mode="local")):
+            await app.receive_control(session, json.dumps({
+                "type": "search_setting", "enabled": True,
+            }))
+        self.assertFalse(session.search_enabled)
+        acknowledgement = session.outgoing.get_nowait().event
+        self.assertEqual((acknowledgement["type"], acknowledgement["enabled"]),
+                         ("search_setting", False))
 
     async def test_turn_uses_its_search_preference_snapshot(self):
         received = []

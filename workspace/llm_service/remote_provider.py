@@ -306,7 +306,8 @@ class OpenCodeLangChainProvider:
 
     async def stream(self, user_text: str, history: list[dict[str, str]],
                      cancelled: asyncio.Event, session_id: str = "",
-                     turn_id: str = "") -> AsyncIterator[dict[str, Any]]:
+                     turn_id: str = "",
+                     search_enabled: bool = False) -> AsyncIterator[dict[str, Any]]:
         from langchain.agents import create_agent
         from langchain.agents.middleware import wrap_model_call
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -371,7 +372,8 @@ class OpenCodeLangChainProvider:
                 return
             agent = create_agent(
                 model=self.model,
-                tools=[self.search_tool, begin_final_answer],
+                tools=([self.search_tool, begin_final_answer] if search_enabled
+                       else [begin_final_answer]),
                 system_prompt=SYSTEM_PROMPT,
                 middleware=[gate_final_speech],
             )

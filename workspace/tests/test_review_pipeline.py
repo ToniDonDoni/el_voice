@@ -1289,8 +1289,11 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                     )
                     await client.send(json.dumps({
                         "type": "start", "sample_rate": 16000,
+                        "search_enabled": mode == "remote",
                     }))
                     started, _ = await receive_event(client, "session_started")
+                    self.assertIs(started.get("search_enabled"), mode == "remote",
+                                  "web search must only be enabled for Remote Voice sessions")
 
                     # Let the first response begin playing while its LLM stream remains open.
                     await client.send(b"\x00\x00" * 512)
@@ -1300,6 +1303,8 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
                                      "the assistant generation must remain in flight after first audio")
                     session = app.active_session
                     original_turn = session.current_turn
+                    self.assertIs(original_turn.search_enabled, mode == "remote",
+                                  "the new turn must snapshot the session search setting")
                     async with asyncio.timeout(1):
                         while not original_turn.playback_started:
                             await asyncio.sleep(0.005)
@@ -1307,6 +1312,12 @@ class WebSocketConversationTests(unittest.IsolatedAsyncioTestCase):
 
                     # Change enabled -> disabled while the assistant is generating and playing.
                     await client.send(json.dumps({"type": "interrupt_setting", "enabled": False}))
+                    if mode == "remote":
+                        await client.send(json.dumps({"type": "search_setting", "enabled": False}))
+                        search_ack, _ = await receive_event(client, "search_setting")
+                        self.assertFalse(search_ack["enabled"])
+                        self.assertTrue(original_turn.search_enabled,
+                                        "changing the preference must not change an active turn")
                     await client.send(b"\x00\x00" * 512)
                     ignored, _ = await receive_event(client, {"speech_ignored", "interrupt"})
                     self.assertEqual(ignored["type"], "speech_ignored",

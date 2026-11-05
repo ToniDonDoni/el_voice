@@ -66,6 +66,7 @@ class VoiceSession:
     outgoing: asyncio.Queue[Outbound] = field(default_factory=lambda: asyncio.Queue(maxsize=8))
     current_turn: Turn | None = None
     interrupt_enabled: bool = True
+    search_enabled: bool = False
     ignored_speech: bool = False
     turns: dict[str, Turn] = field(default_factory=dict)
     history: list[dict[str, str]] = field(default_factory=list)
@@ -300,6 +301,7 @@ async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
         stream = runtime.llm_stream(
             user_text, turn.cancel_event, session.history,
             session_id=session.session_id, turn_id=turn.turn_id,
+            search_enabled=turn.search_enabled,
         )
     else:
         stream = runtime.llm_stream(user_text, turn.cancel_event, session.history)
@@ -630,6 +632,16 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
             return
         session.interrupt_enabled = enabled
         await queue_event(session, {"type": "interrupt_setting", "enabled": enabled})
+    elif kind == "search_setting":
+        enabled = event.get("enabled")
+        if type(enabled) is not bool:
+            await queue_event(session, {
+                "type": "error", "message": "Search setting must be a boolean.",
+            })
+            return
+        remote_mode = getattr(runtime, "mode", "local") == "remote"
+        session.search_enabled = enabled if remote_mode else False
+        await queue_event(session, {"type": "search_setting", "enabled": session.search_enabled})
     elif kind == "client_error":
         log_event("browser_error", session_id=session.session_id,
                   error=str(event.get("message", "Unknown browser error"))[:500])
@@ -723,7 +735,7 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
             })
             return
         session.ignored_speech = False
-        turn = Turn(turn_id=uuid.uuid4().hex)
+        turn = Turn(turn_id=uuid.uuid4().hex, search_enabled=session.search_enabled)
         session.current_turn = turn
         session.remember_turn(turn)
         log_event("speech_started", session_id=session.session_id, turn_id=turn.turn_id,
@@ -795,11 +807,14 @@ async def voice_socket(websocket: WebSocket) -> None:
         start_message = await asyncio.wait_for(websocket.receive_text(), timeout=10)
         start = json.loads(start_message)
         interrupt_enabled = start.get("interrupt_enabled", True)
+        search_enabled = start.get("search_enabled", False)
         if (start.get("type") != "start" or start.get("sample_rate") != SAMPLE_RATE
-                or type(interrupt_enabled) is not bool):
+                or type(interrupt_enabled) is not bool or type(search_enabled) is not bool):
             await queue_event(session, {"type": "error", "message": "Unsupported audio format."})
             return
         session.interrupt_enabled = interrupt_enabled
+        remote_mode = getattr(runtime, "mode", "local") == "remote"
+        session.search_enabled = search_enabled if remote_mode else False
         await queue_event(
             session,
             {
@@ -810,6 +825,7 @@ async def voice_socket(websocket: WebSocket) -> None:
                 "echo_cancellation": start.get("echo_cancellation"),
                 "headphones_required": True,
                 "interrupt_enabled": session.interrupt_enabled,
+                "search_enabled": session.search_enabled,
             },
         )
         while not session.stopped:

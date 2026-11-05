@@ -119,7 +119,8 @@ async def stream_agent(
                 if not isinstance(metadata, dict) or metadata.get("langgraph_node") != "model":
                     continue
                 if not answer_committed:
-                    # Planning messages are never user-facing speech.
+                    # Product rule: never send planning text or tool-call preambles to chat/TTS.
+                    # Forward model text only after begin_final_answer commits to the final response.
                     continue
                 if getattr(chunk, "tool_call_chunks", None) or getattr(chunk, "tool_calls", None):
                     raise RuntimeError("provider_tool_loop_failed")

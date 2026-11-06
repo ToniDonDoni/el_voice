@@ -628,6 +628,34 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                     app.runtime = original_runtime
 
 
+class WhisperTranscriptionOptionsTests(unittest.TestCase):
+    def test_transcription_uses_three_beams_and_preserves_other_options(self):
+        class Whisper:
+            options = None
+
+            def transcribe(self, _audio, **options):
+                self.options = options
+                return iter([SimpleNamespace(text="recognized words")]), None
+
+        runtime = voice_pipeline.VoiceRuntime()
+        runtime.config = {"stt": {"language": "ru"}}
+        runtime.whisper = Whisper()
+
+        result = runtime.transcribe(np.zeros(16000, dtype=np.float32))
+
+        self.assertEqual(result, "recognized words")
+        self.assertEqual(runtime.whisper.options, {
+            "language": "ru",
+            "task": "transcribe",
+            "beam_size": 3,
+            "best_of": 1,
+            "temperature": 0.0,
+            "condition_on_previous_text": False,
+            "vad_filter": False,
+            "without_timestamps": True,
+        })
+
+
 class RuntimeInferenceLockTests(unittest.TestCase):
     def test_uncooperative_runtime_workers_serialize_across_repeated_replacements(self):
         class EngineProbe:

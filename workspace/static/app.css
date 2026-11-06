@@ -108,6 +108,22 @@ h1 span { color: #75837f; }
 .interrupt-control label { display: inline-flex; align-items: center; gap: 8px; color: #c2d0ca; font-size: 11px; cursor: pointer; }
 .interrupt-control input { width: 15px; height: 15px; margin: 0; accent-color: var(--mint); }
 .interrupt-control p { flex-basis: 100%; margin: 0 0 0 23px; color: #77847f; font-size: 10px; line-height: 1.45; }
+.speaker-controls { border-top: 1px solid var(--line); padding: 13px 18px 15px; color: #a8b4b0; font-size: 11px; }
+.speaker-controls h2 { margin: 0 0 11px; color: #d4e0dc; font-size: 12px; }
+.speaker-filter-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.speaker-filter-toggle input { accent-color: var(--mint); }
+#speaker-filter-status { margin: 8px 0; color: #879692; }
+.speaker-enrollment { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.speaker-enrollment select, .speaker-enrollment button, #speaker-profile-list button { min-height: 34px; border: 1px solid #34413c; border-radius: 8px; padding: 0 10px; color: var(--text); background: #151b1e; }
+.speaker-enrollment button { touch-action: none; user-select: none; }
+.speaker-enrollment button:disabled { opacity: .45; }
+.guest-consent { display: flex; align-items: flex-start; gap: 7px; color: #9eaca7; font-size: 10px; line-height: 1.5; }
+.guest-consent input { flex: 0 0 auto; accent-color: var(--mint); }
+.speaker-controls > p { margin: 5px 0; color: #77847f; font-size: 10px; line-height: 1.5; }
+#speaker-profile-list { display: grid; gap: 7px; margin: 10px 0 0; padding: 0; list-style: none; }
+#speaker-profile-list li { display: flex; align-items: center; gap: 8px; }
+#speaker-profile-list label { display: flex; align-items: center; gap: 6px; margin-right: auto; }
+#speaker-profile-list button { min-height: 28px; color: #f4a3a0; }
 .playback-controls { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); padding: 10px 18px 13px; color: #84918d; font-size: 11px; }
 .playback-controls input { width: min(220px, 42vw); accent-color: var(--mint); }
 .playback-controls button { color: var(--mint); }

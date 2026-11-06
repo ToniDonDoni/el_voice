@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
-ALLOWED_HOSTS = {"huggingface.co", "models.silero.ai"}
+ALLOWED_HOSTS = {"huggingface.co", "models.silero.ai", "raw.githubusercontent.com", "www.modelscope.cn"}
 
 
 def get_manifest():

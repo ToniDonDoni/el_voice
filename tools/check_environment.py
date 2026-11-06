@@ -16,7 +16,7 @@ def main():
     print(f"Platform: {platform.system()} {platform.machine()}")
     # Load Torch first so its bundled OpenBLAS is registered before native inference
     # packages can load another library with the same SONAME.
-    for name in ("torch", "fastapi", "uvicorn", "websockets", "numpy", "av",
+    for name in ("torch", "torchaudio", "modelscope", "fastapi", "uvicorn", "websockets", "numpy", "av",
                  "ctranslate2", "faster_whisper", "llama_cpp", "huggingface_hub",
                  "httpx", "langchain", "langchain_openai", "ddgs", "tiktoken"):
         try:

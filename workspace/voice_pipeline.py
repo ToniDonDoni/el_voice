@@ -85,6 +85,26 @@ def _validate_settings(settings: dict[str, Any]) -> None:
     maximum = integer("speech", "max_chunk_chars", 1, 300)
     if first > maximum:
         raise ValueError("speech.first_chunk_max_chars must not exceed speech.max_chunk_chars")
+    speaker = settings.get("speaker")
+    if not isinstance(speaker, dict):
+        raise ValueError("speaker must be an object")
+    if integer("speaker", "sample_rate", 16000, 16000) != SAMPLE_RATE:
+        raise ValueError("speaker.sample_rate must be 16000")
+    if integer("speaker", "chunk_samples", 2560, 2560) != 2560:
+        raise ValueError("speaker.chunk_samples must be 2560")
+    integer("speaker", "cpu_threads", 1, 6)
+    for key, low, high in (("start_threshold", 0.01, 0.99), ("release_threshold", 0.01, 0.98)):
+        value = speaker.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError(f"speaker.{key} is out of range")
+    for key, low, high in (("start_chunks", 1, 10), ("endpoint_silence_ms", 160, 2400),
+                           ("max_queue_frames", 5, 128), ("max_frame_age_ms", 160, 5000),
+                           ("enrollment_min_recording_seconds", 10, 60),
+                           ("enrollment_min_detected_speech_seconds", 1, 10),
+                           ("enrollment_max_seconds", 10, 120)):
+        integer("speaker", key, low, high)
+    if speaker["release_threshold"] > speaker["start_threshold"]:
+        raise ValueError("speaker.release_threshold must not exceed start_threshold")
 
 
 def _load_manifest() -> dict[str, Any]:
@@ -104,6 +124,11 @@ def verify_models(paths: tuple[str, ...] = ("stt/small", "tts/v4_cyrillic.pt")) 
     )
     if result.returncode:
         raise RuntimeError("One or more configured model assets failed verification")
+
+
+def verify_speaker_models() -> None:
+    """Verify both pinned speaker assets before any checkpoint is loaded."""
+    verify_models(("speaker/nomo_pvad.pt", "speaker/eres2netv2/pretrained_eres2netv2.ckpt"))
 
 
 class StreamingSileroVAD:
@@ -228,7 +253,7 @@ class VoiceRuntime:
         self.status: dict[str, Any] = {
             "stage": "error" if self.config_error else "loading",
             "ready": False,
-            "models": {"vad": "loading", "stt": "loading", "llm": "connecting", "tts": "loading"},
+            "models": {"vad": "loading", "stt": "loading", "llm": "connecting", "tts": "loading", "speaker": "unavailable"},
             "error": type(self.config_error).__name__ if self.config_error else None,
         }
         self.mode = os.getenv("EL_VOICE_MODE", "local").lower()
@@ -294,7 +319,25 @@ class VoiceRuntime:
             raise RuntimeError("Configured TTS speaker is unavailable")
         self.status["models"]["tts"] = "ready"
 
+        speaker_root = MODEL_ROOT / "speaker"
+        if (speaker_root / "nomo_pvad.pt").exists() or (speaker_root / "eres2netv2/pretrained_eres2netv2.ckpt").exists():
+            self.status["models"]["speaker"] = "loading"
+            verify_speaker_models()
+            from speaker_models.target import TargetSpeakerModel
+
+            self.speaker_model = TargetSpeakerModel(
+                MODEL_ROOT,
+                cpu_threads=int(self.config["speaker"]["cpu_threads"]),
+            )
+            self.status["models"]["speaker"] = "ready"
+        else:
+            self.speaker_model = None
+            self.status["models"]["speaker"] = "unavailable"
+
     def new_vad(self) -> StreamingSileroVAD:
+        return StreamingSileroVAD(self.vad_config)
+
+    def new_speaker_vad(self) -> StreamingSileroVAD:
         return StreamingSileroVAD(self.vad_config)
 
     def transcribe(self, audio: np.ndarray, cancel_event: threading.Event | None = None) -> str:
@@ -375,7 +418,7 @@ class VoiceRuntime:
         pcm = (audio.clamp(-1, 1) * 32767).to(self.torch.int16).numpy().astype("<i2", copy=False)
         return pcm.tobytes(), int(self.config["tts"]["sample_rate"])
 
-    def status_snapshot(self) -> dict[str, Any]:
+    def status_snapshot(self, session: Any | None = None) -> dict[str, Any]:
         timings = list(self.metrics)
         response = [entry["response_ms"] for entry in timings if "response_ms" in entry]
         interrupt = [entry["interrupt_ms"] for entry in timings if "interrupt_ms" in entry]
@@ -386,7 +429,14 @@ class VoiceRuntime:
             return {
                 "p50": round(float(np.percentile(values, 50)), 1),
                 "p95": round(float(np.percentile(values, 95)), 1),
+                "p99": round(float(np.percentile(values, 99)), 1),
             }
+
+        speaker_model = getattr(self, "speaker_model", None)
+        inference = list(getattr(speaker_model, "last_timings_ms", [])) if speaker_model else []
+        session_metrics = list(getattr(session, "speaker_metrics", [])) if session else []
+        queue_drops = sum(item.get("queue_drops", 0) for item in session_metrics)
+        stale_drops = sum(item.get("stale_drops", 0) for item in session_metrics)
 
         return {
             **self.status,
@@ -395,8 +445,21 @@ class VoiceRuntime:
             "system": "Linux",
             "architecture": "aarch64",
             "model_file_count": sum(1 for item in _load_manifest()["assets"]
-                                     if item["path"].startswith(("stt/", "tts/"))) if self.status["ready"] else None,
+                                     if item["path"].startswith(("stt/", "tts/", "speaker/"))) if self.status["ready"] else None,
             "vad": {"type": "Silero ONNX bundled with faster-whisper", **self.vad_config},
+            "speaker_filter": {
+                "model": self.status.get("models", {}).get("speaker", "unavailable"),
+                "enabled_profiles": sum(1 for item in getattr(session, "speaker_profiles", {}).values()
+                                        if item.get("enabled")) if session else 0,
+                "threshold_start": self.config.get("speaker", {}).get("start_threshold", 0.75),
+                "threshold_release": self.config.get("speaker", {}).get("release_threshold", 0.50),
+                "chunk_ms": 160,
+                "note": "Speaker filtering is a convenience feature, not authentication or source separation.",
+                "inference_ms": percentiles(inference),
+                "queue_drops": queue_drops,
+                "stale_drops": stale_drops,
+                "queue_capacity_frames": int(self.config.get("speaker", {}).get("max_queue_frames", 32)),
+            },
             "audio": self.config.get("audio", {"max_buffered_audio_ms": 2000}),
             "metrics": {
                 "response_samples": len(response),

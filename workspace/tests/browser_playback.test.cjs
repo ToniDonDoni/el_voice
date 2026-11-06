@@ -449,6 +449,57 @@ async function run() {
     await api.stopSession(false);
   });
 
+  await check("speaker enrollment stays held through a delayed sample and saves on release", async () => {
+    assert.match(html, /Every microphone frame is recorded while you hold the button/,
+      "enrollment help must say that the recorded duration follows the held capture");
+    const { api, elements } = harness();
+    const socket = new FakeWebSocket();
+    api.setAudio(new FakeAudioContext(), socket);
+    await api.pollStatus();
+    elements.get("#speaker-enrollment-kind").value = "owner";
+    await api.handleServerMessage(JSON.stringify({
+      type: "session_started", speaker_model_available: true,
+      speaker_filter_enabled: false, speaker_profiles: [],
+    }));
+
+    const button = elements.get("#detect-speaker-button");
+    assert.equal(button.disabled, false, "enrollment must be available after session start");
+    button.listeners.get("pointerdown")({
+      button: 0, pointerId: 42, preventDefault() {},
+    });
+    assert.deepEqual(JSON.parse(socket.sent.at(-1)), {
+      type: "speaker_enrollment_begin", kind: "owner", consent: true,
+    }, "pressing and holding must start enrollment once");
+
+    await api.handleServerMessage(JSON.stringify({
+      type: "speaker_enrollment", state: "capturing", recorded_seconds: 9.2,
+      speech_seconds: 8.4, elapsed_seconds: 12,
+    }));
+    assert.match(elements.get("#speaker-filter-status").textContent, /Recorded: 9\.2 \/ 10\.0 seconds \(held 12\.0 seconds\); speech detected: 8\.4 seconds/);
+
+    // Keep the real pointer hold active across a ten-second capture window.
+    await new Promise(resolve => setTimeout(resolve, 10_000));
+    assert.equal(socket.sent.length, 1,
+      "the browser must not end enrollment while the pointer is still held");
+
+    await api.handleServerMessage(JSON.stringify({
+      type: "speaker_enrollment", state: "capturing", recorded_seconds: 10,
+      speech_seconds: 9.2, elapsed_seconds: 12.8,
+    }));
+    button.listeners.get("pointerup")();
+    assert.deepEqual(JSON.parse(socket.sent.at(-1)), { type: "speaker_enrollment_end" },
+      "releasing the pointer must end and save enrollment");
+
+    await api.handleServerMessage(JSON.stringify({
+      type: "speaker_enrollment", state: "saved", filter_enabled: true,
+      profiles: [{ id: "owner", kind: "owner", enabled: true }],
+    }));
+    assert.equal(elements.get("#speaker-filter-toggle").checked, true,
+      "the saved enrollment response must enable the filter");
+    assert.match(elements.get("#speaker-filter-status").textContent, /saved on this device/);
+    assert.equal(elements.get("#speaker-profile-list").children.length, 1);
+  });
+
   await check("web search preference defaults off and updates the active socket", async () => {
     const markup = html.match(/<input[^>]*id="web-search-toggle"[^>]*>/)?.[0];
     assert.ok(markup && /\btype="checkbox"/.test(markup) && !/\bchecked\b/.test(markup),

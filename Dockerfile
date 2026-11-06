@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # The digest pins the multi-platform official Python image inspected for this recipe.
 ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:e697c81897302a4c4333bade000d98038fbb21eb064f8ee1fd42d02ebcd9d337
 FROM ${PYTHON_IMAGE} AS builder
@@ -32,6 +31,9 @@ ENV PATH="/opt/venv/bin:$PATH" \
     HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
     DO_NOT_TRACK=1 \
+    MODELSCOPE_OFFLINE=1 \
+    MODELSCOPE_DISABLE_UPDATE=1 \
+    MODELSCOPE_CACHE=/data/modelscope \
     HF_HOME=/data/huggingface \
     XDG_CACHE_HOME=/data/cache \
     TIKTOKEN_CACHE_DIR=/opt/tiktoken \

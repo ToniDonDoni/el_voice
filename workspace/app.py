@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import struct
 import time
 import uuid
@@ -20,7 +21,7 @@ from typing import Any
 
 import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from observability import log_structured, utc_timestamp
 
@@ -32,6 +33,7 @@ from voice_pipeline import (
     Turn,
     VoiceRuntime,
 )
+from speaker_profiles import ProfileStore
 
 logging.getLogger("uvicorn.access").disabled = True
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
@@ -81,6 +83,24 @@ class VoiceSession:
     audio_packet_durations: dict[str, dict[int, float]] = field(default_factory=dict)
     browser_buffered_ms: float = 0.0
     audio_capacity: asyncio.Event = field(default_factory=asyncio.Event)
+    speaker_filter_enabled: bool = False
+    speaker_profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    speaker_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=32))
+    speaker_worker: asyncio.Task | None = None
+    speaker_candidate: list[np.ndarray] = field(default_factory=list)
+    speaker_candidate_chunks: int = 0
+    speaker_active: bool = False
+    speaker_enrollment_kind: str | None = None
+    speaker_enrollment_frames: list[np.ndarray] = field(default_factory=list)
+    speaker_enrollment_received_samples: int = 0
+    speaker_enrollment_speech_samples: int = 0
+    speaker_enrollment_started: float = 0.0
+    speaker_enrollment_last_frame_at: float | None = None
+    speaker_enrollment_last_vad_probability: float | None = None
+    speaker_enrollment_last_frame_is_speech: bool = False
+    speaker_enrollment_progress_task: asyncio.Task | None = None
+    speaker_control_times: deque = field(default_factory=deque)
+    speaker_metrics: deque = field(default_factory=lambda: deque(maxlen=1000))
 
     def __post_init__(self) -> None:
         self.audio_capacity.set()
@@ -127,8 +147,15 @@ app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-store"})
+async def index(request: Request) -> HTMLResponse:
+    token = secrets.token_urlsafe(32)
+    document = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    document = document.replace("__EL_VOICE_CSRF_TOKEN__", token)
+    secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+    response = HTMLResponse(document, headers={"Cache-Control": "no-store"})
+    response.set_cookie("el_voice_session", token, httponly=True, secure=secure,
+                        samesite="strict", path="/", max_age=3600)
+    return response
 
 
 @app.get("/healthz")
@@ -139,8 +166,9 @@ async def healthz() -> JSONResponse:
 
 @app.get("/api/status")
 async def status() -> JSONResponse:
+    # Session-owned queue metrics are supplied explicitly; VoiceRuntime has no app globals.
     return JSONResponse({
-        **runtime.status_snapshot(),
+        **runtime.status_snapshot(session=active_session),
         "revision": os.environ.get("EL_VOICE_REVISION", "unknown"),
     })
 
@@ -616,13 +644,198 @@ async def synthesize_and_queue(session: VoiceSession, turn: Turn, text: str) -> 
 
 
 async def receive_control(session: VoiceSession, payload: str) -> None:
+    if len(payload.encode("utf-8", errors="ignore")) > 4096:
+        await queue_event(session, {"type": "error", "message": "Control message is too large."})
+        return
     try:
         event = json.loads(payload)
     except json.JSONDecodeError:
         await queue_event(session, {"type": "error", "message": "Invalid control message."})
         return
+    if not isinstance(event, dict):
+        await queue_event(session, {"type": "error", "message": "Control message must be an object."})
+        return
     kind = event.get("type")
     turn_id = event.get("turn_id")
+    if not isinstance(kind, str):
+        await queue_event(session, {"type": "error", "message": "Control type must be a string."})
+        return
+    if kind and kind.startswith("speaker_"):
+        now = time.monotonic()
+        while session.speaker_control_times and now - session.speaker_control_times[0] > 60:
+            session.speaker_control_times.popleft()
+        limit = 60 if kind == "speaker_enrollment_end" else 20
+        if len(session.speaker_control_times) >= limit:
+            await queue_event(session, {"type": "speaker_error", "message": "Speaker controls are rate limited."})
+            return
+        session.speaker_control_times.append(now)
+    if kind == "speaker_enrollment_begin":
+        profile_kind = event.get("kind")
+        if not isinstance(profile_kind, str) or profile_kind not in {"owner", "guest"}:
+            await queue_event(session, {"type": "speaker_error", "message": "Choose owner or guest enrollment."})
+            return
+        if profile_kind == "guest" and event.get("consent") is not True:
+            await queue_event(session, {"type": "speaker_error", "message": "Guest enrollment requires their explicit consent."})
+            return
+        if getattr(runtime, "speaker_model", None) is None:
+            await queue_event(session, {"type": "speaker_error", "message": "Local speaker model is unavailable."})
+            return
+        if session.speaker_enrollment_kind:
+            await queue_event(session, {"type": "speaker_error", "message": "Speaker enrollment is already active."})
+            return
+        previous = session.current_turn
+        if previous:
+            previous.cancel_event.set()
+            clear_turn_outgoing(session, previous.turn_id)
+            if previous.playback_started:
+                session.interrupt_pending[previous.turn_id] = time.monotonic()
+            await queue_event(session, {"type": "interrupt", "turn_id": previous.turn_id})
+            session.current_turn = None
+            log_event("speaker_enrollment_interrupted_turn", session_id=session.session_id,
+                      turn_id=previous.turn_id, playback_was_active=previous.playback_started)
+        while True:
+            try:
+                session.speaker_queue.get_nowait()
+                session.speaker_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        session.speaker_candidate.clear()
+        session.speaker_candidate_chunks = 0
+        session.speaker_active = False
+        session.speaker_enrollment_kind = profile_kind
+        session.speaker_enrollment_frames.clear()
+        session.speaker_enrollment_received_samples = 0
+        session.speaker_enrollment_speech_samples = 0
+        session.speaker_enrollment_started = time.monotonic()
+        session.speaker_enrollment_last_frame_at = None
+        session.speaker_enrollment_last_vad_probability = None
+        session.speaker_enrollment_last_frame_is_speech = False
+        session.enrollment_vad = runtime.new_vad()
+        session.vad = runtime.new_vad()
+        log_event("speaker_enrollment_button", session_id=session.session_id,
+                  state="pressed", held=True, kind=profile_kind,
+                  speaker_filter_enabled=session.speaker_filter_enabled)
+        progress_task = asyncio.create_task(
+            speaker_enrollment_progress(session), name=f"speaker-enrollment-progress-{session.session_id}"
+        )
+        session.speaker_enrollment_progress_task = progress_task
+        session.tasks.add(progress_task)
+        progress_task.add_done_callback(session.tasks.discard)
+        speaker_config = runtime.config.get("speaker", {})
+        await queue_event(session, {"type": "speaker_enrollment", "state": "capturing", "kind": profile_kind,
+                                    "minimum_recording_seconds": int(speaker_config.get("enrollment_min_recording_seconds", 10)),
+                                    "minimum_detected_speech_seconds": int(speaker_config.get("enrollment_min_detected_speech_seconds", 2))})
+    elif kind in {"speaker_enrollment_end", "speaker_enrollment_cancel"}:
+        if not session.speaker_enrollment_kind:
+            await queue_event(session, {"type": "speaker_error", "message": "No speaker enrollment is active."})
+            return
+        if kind == "speaker_enrollment_cancel":
+            elapsed = max(0.0, time.monotonic() - session.speaker_enrollment_started)
+            log_event("speaker_enrollment_button", session_id=session.session_id,
+                      state="cancelled", held=False, elapsed_seconds=round(elapsed, 1),
+                      recorded_seconds=round(session.speaker_enrollment_received_samples / SAMPLE_RATE, 1),
+                      speech_seconds=round(session.speaker_enrollment_speech_samples / SAMPLE_RATE, 1))
+            await stop_speaker_enrollment_progress(session)
+            session.speaker_enrollment_kind = None
+            session.speaker_enrollment_frames.clear()
+            session.speaker_enrollment_received_samples = 0
+            session.speaker_enrollment_speech_samples = 0
+            await queue_event(session, {"type": "speaker_enrollment", "state": "cancelled"})
+            return
+        profile_kind = session.speaker_enrollment_kind
+        elapsed = max(0.0, time.monotonic() - session.speaker_enrollment_started)
+        recorded_samples = session.speaker_enrollment_received_samples
+        speech_samples = session.speaker_enrollment_speech_samples
+        await stop_speaker_enrollment_progress(session)
+        speaker_config = runtime.config.get("speaker", {})
+        minimum = int(speaker_config.get("enrollment_min_recording_seconds", 10) * SAMPLE_RATE)
+        minimum_speech = int(speaker_config.get("enrollment_min_detected_speech_seconds", 2) * SAMPLE_RATE)
+        audio = np.concatenate(session.speaker_enrollment_frames) if session.speaker_enrollment_frames else np.zeros(0, dtype=np.float32)
+        log_event("speaker_enrollment_button", session_id=session.session_id,
+                  state="released", held=False, elapsed_seconds=round(elapsed, 1),
+                  recorded_seconds=round(recorded_samples / SAMPLE_RATE, 1),
+                  speech_seconds=round(speech_samples / SAMPLE_RATE, 1))
+        session.speaker_enrollment_kind = None
+        session.speaker_enrollment_frames.clear()
+        session.speaker_enrollment_received_samples = 0
+        session.speaker_enrollment_speech_samples = 0
+        if audio.size < minimum:
+            await queue_event(session, {"type": "speaker_error", "message": "Enrollment needs at least 10 seconds of recorded audio; the previous profile was kept."})
+            return
+        if speech_samples < minimum_speech:
+            await queue_event(session, {"type": "speaker_error", "message": f"Enrollment needs at least {minimum_speech / SAMPLE_RATE:g} seconds of detected speech; the previous profile was kept."})
+            return
+        try:
+            await queue_event(session, {"type": "speaker_enrollment", "state": "processing"})
+            embedding = await asyncio.to_thread(runtime.speaker_model.enroll, audio)
+            profile_id = "owner" if profile_kind == "owner" else None
+            if profile_id is None:
+                profile_id = f"guest-{secrets.token_hex(6)}"
+            await asyncio.to_thread(runtime.speaker_model.warmup, profile_id, embedding)
+            store = profile_store()
+            profile_id = await asyncio.to_thread(store.upsert, profile_kind, embedding, profile_id)
+            session.speaker_profiles = await asyncio.to_thread(store.load)
+            session.speaker_filter_enabled = True
+            if session.speaker_worker is None or session.speaker_worker.done():
+                session.speaker_worker = asyncio.create_task(
+                    speaker_audio_worker(session), name=f"speaker-filter-{session.session_id}"
+                )
+            await queue_event(session, {"type": "speaker_enrollment", "state": "saved", "profile": profile_id,
+                                        "profiles": public_profiles(session.speaker_profiles),
+                                        "filter_enabled": True})
+        except Exception as exc:
+            log_event("speaker_enrollment_failed", session_id=session.session_id, error=type(exc).__name__)
+            await queue_event(session, {"type": "speaker_error", "message": "Could not save the speaker profile; the previous profile was kept."})
+        return
+    elif kind == "speaker_filter_setting":
+        enabled = event.get("enabled")
+        if type(enabled) is not bool:
+            await queue_event(session, {"type": "speaker_error", "message": "Filtering setting must be a boolean."})
+            return
+        await queue_event(session, {"type": "speaker_error", "message": "End the session to change filtering; the setting is applied at the next session start.",
+                                    "enabled": session.speaker_filter_enabled})
+    elif kind == "speaker_profile_enabled":
+        profile_id, enabled = event.get("profile_id"), event.get("enabled")
+        if not isinstance(profile_id, str) or profile_id not in session.speaker_profiles or type(enabled) is not bool:
+            await queue_event(session, {"type": "speaker_error", "message": "Invalid speaker profile setting."})
+            return
+        profiles = {key: dict(profile) for key, profile in session.speaker_profiles.items()}
+        profiles[profile_id]["enabled"] = enabled
+        try:
+            await asyncio.to_thread(profile_store().save, profiles)
+        except Exception:
+            await queue_event(session, {"type": "speaker_error",
+                                        "message": "Could not save the speaker setting; the existing profile settings were kept."})
+            return
+        session.speaker_profiles = profiles
+        if not enabled:
+            runtime.speaker_model.clear(profile_id)
+        await queue_event(session, {"type": "speaker_profiles", "profiles": public_profiles(profiles),
+                                    "filter_enabled": session.speaker_filter_enabled})
+    elif kind == "speaker_profile_delete":
+        profile_id = event.get("profile_id")
+        if not isinstance(profile_id, str) or profile_id not in session.speaker_profiles:
+            await queue_event(session, {"type": "speaker_error", "message": "Speaker profile was not found."})
+            return
+        profiles = {key: dict(profile) for key, profile in session.speaker_profiles.items()}
+        profiles.pop(profile_id)
+        try:
+            if profiles:
+                await asyncio.to_thread(profile_store().save, profiles)
+            else:
+                store = profile_store()
+                store.path.unlink(missing_ok=True)
+        except Exception:
+            await queue_event(session, {"type": "speaker_error",
+                                        "message": "Could not delete the speaker profile; existing profiles were kept."})
+            return
+        session.speaker_profiles = profiles
+        runtime.speaker_model.clear(profile_id)
+        await queue_event(session, {"type": "speaker_profiles", "profiles": public_profiles(profiles),
+                                    "filter_enabled": session.speaker_filter_enabled})
+    elif kind == "speaker_profiles_get":
+        await queue_event(session, {"type": "speaker_profiles", "profiles": public_profiles(session.speaker_profiles),
+                                    "filter_enabled": session.speaker_filter_enabled})
     if kind == "interrupt_setting":
         enabled = event.get("enabled")
         if type(enabled) is not bool:
@@ -718,11 +931,74 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         await clear_llm_context(session.session_id)
 
 
-async def receive_audio(session: VoiceSession, payload: bytes) -> None:
-    if len(payload) != VAD_FRAME_SAMPLES * 2:
-        await queue_event(session, {"type": "error", "message": "Unexpected microphone frame size."})
+def allowed_origins() -> set[str]:
+    configured = os.environ.get("EL_VOICE_ALLOWED_ORIGINS", "")
+    return {item.strip().rstrip("/") for item in configured.split(",") if item.strip()} | {
+        "http://localhost:8765", "http://127.0.0.1:8765",
+    }
+
+
+def profile_store() -> ProfileStore:
+    store = getattr(runtime, "profile_store", None)
+    if store is None:
+        store = ProfileStore()
+        runtime.profile_store = store
+    return store
+
+
+def public_profiles(profiles: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"id": key, "kind": value["kind"], "enabled": value["enabled"]}
+            for key, value in profiles.items()]
+
+
+async def speaker_enrollment_progress(session: VoiceSession) -> None:
+    """Report hold state and capture counters independently of microphone frame arrival."""
+    max_seconds = float(runtime.config.get("speaker", {}).get("enrollment_max_seconds", 45))
+    while session.speaker_enrollment_kind and not session.stopped:
+        now = time.monotonic()
+        elapsed = max(0.0, now - session.speaker_enrollment_started)
+        recorded_seconds = round(session.speaker_enrollment_received_samples / SAMPLE_RATE, 1)
+        speech_seconds = round(session.speaker_enrollment_speech_samples / SAMPLE_RATE, 1)
+        frame_gap_ms = (None if session.speaker_enrollment_last_frame_at is None else
+                        round(max(0.0, now - session.speaker_enrollment_last_frame_at) * 1000, 1))
+        log_event("speaker_enrollment_progress", session_id=session.session_id,
+                  button_held=True, elapsed_seconds=round(elapsed, 1),
+                  recorded_seconds=recorded_seconds, speech_seconds=speech_seconds,
+                  received_frames=session.speaker_enrollment_received_samples // VAD_FRAME_SAMPLES,
+                  audio_frame_gap_ms=frame_gap_ms,
+                  vad_probability=session.speaker_enrollment_last_vad_probability,
+                  vad_speech_frame=session.speaker_enrollment_last_frame_is_speech)
+        await queue_event(session, {"type": "speaker_enrollment", "state": "capturing",
+                                    "recorded_seconds": recorded_seconds,
+                                    "speech_seconds": speech_seconds,
+                                    "elapsed_seconds": round(elapsed, 1),
+                                    "audio_frame_gap_ms": frame_gap_ms})
+        if elapsed >= max_seconds:
+            session.speaker_enrollment_kind = None
+            session.speaker_enrollment_frames.clear()
+            session.speaker_enrollment_received_samples = 0
+            session.speaker_enrollment_speech_samples = 0
+            session.speaker_enrollment_progress_task = None
+            log_event("speaker_enrollment_button", session_id=session.session_id,
+                      state="timed_out", held=False, elapsed_seconds=round(elapsed, 1),
+                      audio_frame_gap_ms=frame_gap_ms)
+            await queue_event(session, {"type": "speaker_error", "message": "Enrollment timed out; the previous profile was kept."})
+            return
+        await asyncio.sleep(0.5)
+
+
+async def stop_speaker_enrollment_progress(session: VoiceSession) -> None:
+    task = session.speaker_enrollment_progress_task
+    session.speaker_enrollment_progress_task = None
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def _process_audio_frame(session: VoiceSession, frame: np.ndarray) -> None:
+    if session.speaker_enrollment_kind:
         return
-    frame = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
     event, completed_audio, score = session.vad.accept(frame)
     if event == "start":
         previous = session.current_turn
@@ -730,16 +1006,14 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
             session.ignored_speech = True
             log_event("speech_ignored_during_reply", session_id=session.session_id,
                       turn_id=previous.turn_id, reason="interrupt_disabled")
-            await queue_event(session, {
-                "type": "speech_ignored", "turn_id": previous.turn_id,
-            })
+            await queue_event(session, {"type": "speech_ignored", "turn_id": previous.turn_id})
             return
         session.ignored_speech = False
         turn = Turn(turn_id=uuid.uuid4().hex, search_enabled=session.search_enabled)
         session.current_turn = turn
         session.remember_turn(turn)
         log_event("speech_started", session_id=session.session_id, turn_id=turn.turn_id,
-                  vad_probability=round(score, 3))
+                  vad_probability=round(score, 3), speaker_filter=session.speaker_filter_enabled)
         if previous:
             log_event("barge_in", session_id=session.session_id, old_turn_id=previous.turn_id,
                       new_turn_id=turn.turn_id, playback_was_active=previous.playback_started)
@@ -752,15 +1026,10 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
             if previous.playback_started:
                 session.interrupt_pending[previous.turn_id] = turn.speech_onset_at
             clear_outgoing(session)
-            await queue_event(
-                session,
-                {"type": "interrupt", "turn_id": previous.turn_id, "next_turn_id": turn.turn_id},
-            )
-        await queue_event(
-            session,
-            {"type": "speech_started", "turn_id": turn.turn_id, "vad_probability": round(score, 3)},
-            turn.turn_id,
-        )
+            await queue_event(session, {"type": "interrupt", "turn_id": previous.turn_id,
+                                        "next_turn_id": turn.turn_id})
+        await queue_event(session, {"type": "speech_started", "turn_id": turn.turn_id,
+                                    "vad_probability": round(score, 3)}, turn.turn_id)
     elif event == "end" and completed_audio is not None and session.current_turn:
         if session.ignored_speech:
             session.ignored_speech = False
@@ -780,9 +1049,160 @@ async def receive_audio(session: VoiceSession, payload: bytes) -> None:
         session.current_turn = None
 
 
+async def speaker_audio_worker(session: VoiceSession) -> None:
+    """Score 160 ms chunks off the WebSocket loop; old/backlogged audio fails closed."""
+    cfg = runtime.config.get("speaker", {})
+    chunk_frames = 5
+    threshold = float(cfg.get("start_threshold", 0.75))
+    release = float(cfg.get("release_threshold", 0.50))
+    needed = int(cfg.get("start_chunks", 2))
+    max_age = float(cfg.get("max_frame_age_ms", 1000)) / 1000
+    while not session.stopped:
+        item = await session.speaker_queue.get()
+        batch = [item]
+        try:
+            while len(batch) < chunk_frames:
+                batch.append(await asyncio.wait_for(session.speaker_queue.get(), timeout=0.25))
+        except asyncio.TimeoutError:
+            for _ in batch:
+                session.speaker_queue.task_done()
+            session.speaker_candidate.clear()
+            session.speaker_candidate_chunks = 0
+            session.speaker_active = False
+            continue
+        try:
+            now = time.monotonic()
+            if now - batch[0][1] > max_age or now - batch[-1][1] > max_age:
+                session.speaker_metrics.append({"stale_drops": 1})
+                session.speaker_candidate.clear()
+                session.speaker_candidate_chunks = 0
+                session.speaker_active = False
+                if session.current_turn:
+                    silence = np.zeros(VAD_FRAME_SAMPLES, dtype=np.float32)
+                    for _ in batch:
+                        await _process_audio_frame(session, silence)
+                continue
+            profiles = {key: profile["embedding"] for key, profile in session.speaker_profiles.items()
+                        if profile["enabled"]}
+            if not session.speaker_filter_enabled:
+                for frame, _received_at in batch:
+                    await _process_audio_frame(session, frame)
+                continue
+            chunk = np.concatenate([frame for frame, _received_at in batch])
+            try:
+                if profiles:
+                    score, elapsed = await asyncio.to_thread(runtime.speaker_model.score, profiles, chunk)
+                else:
+                    score, elapsed = 0.0, 0.0
+            except Exception as exc:
+                log_event("speaker_scoring_failed", session_id=session.session_id, error=type(exc).__name__)
+                await queue_event(session, {"type": "speaker_error", "message": "Speaker filter failed closed."})
+                session.speaker_candidate.clear()
+                session.speaker_candidate_chunks = 0
+                session.speaker_active = False
+                if session.current_turn:
+                    for frame, _ in batch:
+                        await _process_audio_frame(session, np.zeros_like(frame))
+                continue
+            session.speaker_metrics.append({"inference_ms": elapsed})
+            if session.speaker_active and score >= release:
+                for offset in range(0, chunk.size, VAD_FRAME_SAMPLES):
+                    frame = chunk[offset:offset + VAD_FRAME_SAMPLES]
+                    if frame.size == VAD_FRAME_SAMPLES:
+                        await _process_audio_frame(session, frame)
+            elif not session.speaker_active and score >= threshold:
+                if session.speaker_candidate_chunks < needed:
+                    session.speaker_candidate.append(chunk)
+                    session.speaker_candidate_chunks += 1
+                if session.speaker_candidate_chunks >= needed:
+                    session.speaker_active = True
+                    buffered = np.concatenate(session.speaker_candidate)
+                    session.speaker_candidate.clear()
+                    for offset in range(0, buffered.size, VAD_FRAME_SAMPLES):
+                        frame = buffered[offset:offset + VAD_FRAME_SAMPLES]
+                        if frame.size == VAD_FRAME_SAMPLES:
+                            await _process_audio_frame(session, frame)
+            else:
+                session.speaker_active = False
+                session.speaker_candidate.clear()
+                session.speaker_candidate_chunks = 0
+                zeros = np.zeros(VAD_FRAME_SAMPLES, dtype=np.float32)
+                for _frame, _received_at in batch:
+                    await _process_audio_frame(session, zeros)
+        finally:
+            for _ in batch:
+                session.speaker_queue.task_done()
+
+
+async def receive_audio(session: VoiceSession, payload: bytes) -> None:
+    if len(payload) != VAD_FRAME_SAMPLES * 2:
+        await queue_event(session, {"type": "error", "message": "Unexpected microphone frame size."})
+        return
+    frame = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
+    if session.speaker_enrollment_kind:
+        max_seconds = float(runtime.config.get("speaker", {}).get("enrollment_max_seconds", 45))
+        elapsed = time.monotonic() - session.speaker_enrollment_started
+        if elapsed > max_seconds:
+            session.speaker_enrollment_kind = None
+            session.speaker_enrollment_frames.clear()
+            session.speaker_enrollment_received_samples = 0
+            session.speaker_enrollment_speech_samples = 0
+            session.speaker_enrollment_progress_task = None
+            log_event("speaker_enrollment_button", session_id=session.session_id,
+                      state="timed_out", held=False, elapsed_seconds=round(elapsed, 1))
+            await queue_event(session, {"type": "speaker_error", "message": "Enrollment timed out; the previous profile was kept."})
+            return
+        probability = session.enrollment_vad.probability(frame)
+        speech_frame = probability >= session.enrollment_vad.threshold
+        max_recorded_samples = int(max_seconds * SAMPLE_RATE)
+        if session.speaker_enrollment_received_samples + frame.size > max_recorded_samples:
+            session.speaker_enrollment_kind = None
+            session.speaker_enrollment_frames.clear()
+            session.speaker_enrollment_received_samples = 0
+            session.speaker_enrollment_speech_samples = 0
+            log_event("speaker_enrollment_button", session_id=session.session_id,
+                      state="recording_limit_reached", held=False, elapsed_seconds=round(elapsed, 1))
+            await queue_event(session, {"type": "speaker_error", "message": "Enrollment reached its maximum recording duration; the previous profile was kept."})
+            return
+        session.speaker_enrollment_frames.append(frame.copy())
+        session.speaker_enrollment_received_samples += frame.size
+        if speech_frame:
+            session.speaker_enrollment_speech_samples += frame.size
+        session.speaker_enrollment_last_frame_at = time.monotonic()
+        session.speaker_enrollment_last_vad_probability = round(probability, 3)
+        session.speaker_enrollment_last_frame_is_speech = speech_frame
+        return
+    if session.speaker_filter_enabled:
+        try:
+            session.speaker_queue.put_nowait((frame, time.monotonic()))
+        except asyncio.QueueFull:
+            dropped = 0
+            while True:
+                try:
+                    session.speaker_queue.get_nowait()
+                    session.speaker_queue.task_done()
+                    dropped += 1
+                except asyncio.QueueEmpty:
+                    break
+            session.speaker_candidate.clear()
+            session.speaker_candidate_chunks = 0
+            session.speaker_metrics.append({"queue_drops": 1})
+            await queue_event(session, {"type": "speaker_error", "message": "Speaker inference fell behind; audio was discarded to fail closed."})
+            if session.current_turn:
+                silence = np.zeros(VAD_FRAME_SAMPLES, dtype=np.float32)
+                for _ in range(dropped):
+                    await _process_audio_frame(session, silence)
+        return
+    await _process_audio_frame(session, frame)
+
+
 @app.websocket("/ws/voice")
 async def voice_socket(websocket: WebSocket) -> None:
     global active_session
+    origin = websocket.headers.get("origin", "").rstrip("/")
+    if not origin or origin not in allowed_origins():
+        await websocket.close(code=1008, reason="Unexpected WebSocket origin")
+        return
     await websocket.accept()
     if not runtime.status["ready"]:
         await websocket.send_text(json.dumps({"type": "not_ready", "status": runtime.status_snapshot()}))
@@ -798,6 +1218,7 @@ async def voice_socket(websocket: WebSocket) -> None:
             session_id=uuid.uuid4().hex,
             websocket=websocket,
             vad=runtime.new_vad(),
+            speaker_queue=asyncio.Queue(maxsize=int(getattr(runtime, "config", {}).get("speaker", {}).get("max_queue_frames", 32))),
         )
         active_session = session
     log_event("session_started", session_id=session.session_id)
@@ -808,13 +1229,33 @@ async def voice_socket(websocket: WebSocket) -> None:
         start = json.loads(start_message)
         interrupt_enabled = start.get("interrupt_enabled", True)
         search_enabled = start.get("search_enabled", False)
+        speaker_filter_enabled = start.get("speaker_filter_enabled", False)
+        csrf_token = start.get("csrf_token")
         if (start.get("type") != "start" or start.get("sample_rate") != SAMPLE_RATE
-                or type(interrupt_enabled) is not bool or type(search_enabled) is not bool):
+                or type(interrupt_enabled) is not bool or type(search_enabled) is not bool
+                or type(speaker_filter_enabled) is not bool
+                or not isinstance(csrf_token, str) or not secrets.compare_digest(
+                    csrf_token, websocket.cookies.get("el_voice_session", "")
+                )):
             await queue_event(session, {"type": "error", "message": "Unsupported audio format."})
             return
         session.interrupt_enabled = interrupt_enabled
         remote_mode = getattr(runtime, "mode", "local") == "remote"
         session.search_enabled = search_enabled if remote_mode else False
+        try:
+            session.speaker_profiles = await asyncio.to_thread(profile_store().load)
+        except Exception as exc:
+            log_event("speaker_profiles_invalid", session_id=session.session_id, error=type(exc).__name__)
+            session.speaker_profiles = {}
+        if speaker_filter_enabled and (getattr(runtime, "speaker_model", None) is None
+                or not any(item["enabled"] for item in session.speaker_profiles.values())):
+            await queue_event(session, {"type": "speaker_error", "message": "Filtering needs a valid local model and an enabled speaker profile."})
+            return
+        session.speaker_filter_enabled = speaker_filter_enabled
+        if session.speaker_filter_enabled:
+            session.speaker_worker = asyncio.create_task(
+                speaker_audio_worker(session), name=f"speaker-filter-{session.session_id}"
+            )
         await queue_event(
             session,
             {
@@ -826,6 +1267,10 @@ async def voice_socket(websocket: WebSocket) -> None:
                 "headphones_required": True,
                 "interrupt_enabled": session.interrupt_enabled,
                 "search_enabled": session.search_enabled,
+                "speaker_filter_enabled": session.speaker_filter_enabled,
+                "speaker_filter_state": "enabled" if session.speaker_filter_enabled else "filtering off",
+                "speaker_model_available": getattr(runtime, "speaker_model", None) is not None,
+                "speaker_profiles": public_profiles(session.speaker_profiles),
             },
         )
         while not session.stopped:
@@ -845,10 +1290,20 @@ async def voice_socket(websocket: WebSocket) -> None:
         log_event("websocket_error", session_id=session.session_id, error=type(exc).__name__,
                   detail=str(exc)[:500])
     finally:
+        if session.speaker_enrollment_kind:
+            elapsed = max(0.0, time.monotonic() - session.speaker_enrollment_started)
+            log_event("speaker_enrollment_button", session_id=session.session_id,
+                      state="session_ended", held=False, elapsed_seconds=round(elapsed, 1),
+                      recorded_seconds=round(session.speaker_enrollment_received_samples / SAMPLE_RATE, 1),
+                      speech_seconds=round(session.speaker_enrollment_speech_samples / SAMPLE_RATE, 1))
+            session.speaker_enrollment_kind = None
+            session.speaker_enrollment_frames.clear()
         session.stopped = True
         for turn in session.turns.values():
             turn.cancel_event.set()
         sender.cancel()
+        if session.speaker_worker:
+            session.speaker_worker.cancel()
         clear_outgoing(session)
         for task in tuple(session.tasks):
             task.cancel()
@@ -863,6 +1318,13 @@ async def voice_socket(websocket: WebSocket) -> None:
         await clear_llm_context(session.session_id)
         with suppress(asyncio.CancelledError, WebSocketDisconnect):
             await sender
+        if session.speaker_worker:
+            with suppress(asyncio.CancelledError):
+                await session.speaker_worker
+        speaker_model = getattr(runtime, "speaker_model", None)
+        if speaker_model is not None:
+            for profile_id in session.speaker_profiles:
+                speaker_model.clear(profile_id)
         async with session_lock:
             if active_session is session:
                 active_session = None

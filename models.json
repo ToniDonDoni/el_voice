@@ -1,5 +1,5 @@
 {
-  "description": "Publisher assets for the first CPU voice pipeline. No reviewed-author assets are used.",
+  "description": "Publisher assets for the local CPU voice pipeline, including target-speaker filtering.",
   "assets": [
     {
       "path": "llm/gemma-3-1b-it-Q4_K_M.gguf",
@@ -43,6 +43,20 @@
       "license": "CC-BY-NC-SA-4.0",
       "integrity_note": "No independent publisher SHA256 was available during recipe preparation. Download from the official HTTPS host and record a local SHA256 receipt. This is first-download trust, not publisher attestation. Do not execute arbitrary replacement .pt files.",
       "size": 35431527
+    },
+    {
+      "path": "speaker/nomo_pvad.pt",
+      "url": "https://raw.githubusercontent.com/tuya/nomo-pvad/cb828468d183424fd574984f00b3ffbcce0be9bc/weights/nomo_pvad.pt",
+      "size": 36576677,
+      "sha256": "0acf2f3e75409b172771663fd1bee31af2760dba4e25b1353d2c26726b6412d1",
+      "license": "Apache-2.0"
+    },
+    {
+      "path": "speaker/eres2netv2/pretrained_eres2netv2.ckpt",
+      "url": "https://www.modelscope.cn/models/iic/speech_eres2netv2_sv_zh-cn_16k-common/resolve/1cf80d41fb3435bd3d8df185b5c423333b2db42a/pretrained_eres2netv2.ckpt",
+      "size": 71768231,
+      "sha256": "0eb4057106b2573dd7b132cf0c36273ab29afd192c1610f80baa9c556dbb963c",
+      "license": "Apache-2.0"
     }
   ]
 }

@@ -4,9 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="el-voice-csrf" content="__EL_VOICE_CSRF_TOKEN__">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css?v=web-search-toggle-20261105">
-  <script src="/static/app.js?v=web-search-toggle-20261105" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=speaker-filter-20261106">
+  <script src="/static/app.js?v=speaker-enrollment-recording-20261106" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -58,6 +59,28 @@
         </label>
         <p>When enabled, Remote Voice can search the public web for current information.</p>
       </div>
+      <section class="speaker-controls" aria-labelledby="speaker-title">
+        <h2 id="speaker-title">Speaker filter</h2>
+        <label class="speaker-filter-toggle" for="speaker-filter-toggle">
+          <input id="speaker-filter-toggle" type="checkbox">
+          <span>Only accept enrolled speakers</span>
+        </label>
+        <p id="speaker-filter-status" role="status" aria-live="polite">Filtering off — legacy voice detection is active.</p>
+        <div class="speaker-enrollment">
+          <label for="speaker-enrollment-kind">Profile</label>
+          <select id="speaker-enrollment-kind">
+            <option value="owner">My voice</option>
+            <option value="guest">Consenting guest</option>
+          </select>
+          <button id="detect-speaker-button" type="button" aria-describedby="speaker-enrollment-help" disabled>Hold to detect speaker</button>
+        </div>
+        <label id="guest-consent-label" class="guest-consent" hidden>
+          <input id="guest-consent" type="checkbox">
+          <span>The guest has agreed to enroll and store their voice profile on this device.</span>
+        </label>
+        <p id="speaker-enrollment-help">Every microphone frame is recorded while you hold the button. Hold while speaking clearly and release after 10 seconds recorded. Speech detected by the local VAD is shown separately; samples with less than 2 seconds of detected speech are rejected. Enrollment stays on this device and is not sent to speech recognition or the language model.</p>
+        <ul id="speaker-profile-list" aria-label="Enrolled speaker profiles"></ul>
+      </section>
       <div class="playback-controls" aria-label="Assistant playback volume">
         <button id="mute-button" class="text-button" type="button" aria-pressed="false">Mute</button>
         <label for="volume-control">Voice volume</label>

@@ -3,12 +3,13 @@
     "model": "tts/v4_cyrillic.pt",
     "speaker": "b_lez",
     "sample_rate": 24000,
-    "cpu_threads": 4
+    "cpu_threads": 2
   },
   "stt": {
     "model": "stt/small",
     "language": "ru",
-    "cpu_threads": 4
+    "cpu_threads": 2,
+    "beam_size": 1
   },
   "speaker": {
     "implementation": "Nomo-PVAD release-1.1",

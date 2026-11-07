@@ -34,6 +34,7 @@ from voice_pipeline import (
     VoiceRuntime,
 )
 from speaker_profiles import ProfileStore
+from speaker_activity_gate import SpeakerActivityGate
 
 logging.getLogger("uvicorn.access").disabled = True
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
@@ -90,6 +91,7 @@ class VoiceSession:
     speaker_candidate: list[np.ndarray] = field(default_factory=list)
     speaker_candidate_chunks: int = 0
     speaker_active: bool = False
+    speaker_activity_gate: SpeakerActivityGate | None = None
     speaker_enrollment_kind: str | None = None
     speaker_enrollment_frames: list[np.ndarray] = field(default_factory=list)
     speaker_enrollment_received_samples: int = 0
@@ -1070,6 +1072,7 @@ async def speaker_audio_worker(session: VoiceSession) -> None:
             session.speaker_candidate_chunks = 0
             session.speaker_active = False
             continue
+        gate_ended = False
         try:
             now = time.monotonic()
             if now - batch[0][1] > max_age or now - batch[-1][1] > max_age:
@@ -1088,6 +1091,34 @@ async def speaker_audio_worker(session: VoiceSession) -> None:
                 for frame, _received_at in batch:
                     await _process_audio_frame(session, frame)
                 continue
+            # Silero remains active, but the heavier speaker model runs only
+            # while the activity gate detects speech.
+            if session.speaker_activity_gate is not None:
+                should_score, gate_started, gate_ended, pre_roll = (
+                    session.speaker_activity_gate.observe([frame for frame, _ in batch])
+                )
+                if gate_started:
+                    # Drop the previous utterance's rolling speaker state.
+                    for profile_id in profiles:
+                        runtime.speaker_model.clear(profile_id)
+                    session.speaker_active = False
+                    session.speaker_candidate.clear()
+                    session.speaker_candidate_chunks = 0
+                    # Keep pre-onset audio; release it only after Nomo verifies
+                    # the enrolled speaker on the current utterance.
+                    session.speaker_candidate.extend(
+                        np.concatenate(prior_frames) for prior_frames in pre_roll
+                    )
+                if not should_score:
+                    session.speaker_active = False
+                    session.speaker_candidate.clear()
+                    session.speaker_candidate_chunks = 0
+                    if session.current_turn:
+                        silence = np.zeros(VAD_FRAME_SAMPLES, dtype=np.float32)
+                        for _frame, _received_at in batch:
+                            await _process_audio_frame(session, silence)
+                    continue
+
             chunk = np.concatenate([frame for frame, _received_at in batch])
             try:
                 if profiles:
@@ -1130,6 +1161,13 @@ async def speaker_audio_worker(session: VoiceSession) -> None:
                 for _frame, _received_at in batch:
                     await _process_audio_frame(session, zeros)
         finally:
+            if gate_ended:
+                # The next utterance starts with fresh speaker-scoring context.
+                session.speaker_active = False
+                session.speaker_candidate.clear()
+                session.speaker_candidate_chunks = 0
+                for profile_id in session.speaker_profiles:
+                    runtime.speaker_model.clear(profile_id)
             for _ in batch:
                 session.speaker_queue.task_done()
 
@@ -1253,6 +1291,7 @@ async def voice_socket(websocket: WebSocket) -> None:
             return
         session.speaker_filter_enabled = speaker_filter_enabled
         if session.speaker_filter_enabled:
+            session.speaker_activity_gate = SpeakerActivityGate(runtime.new_speaker_vad())
             session.speaker_worker = asyncio.create_task(
                 speaker_audio_worker(session), name=f"speaker-filter-{session.session_id}"
             )

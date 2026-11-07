@@ -9,7 +9,7 @@
     "model": "stt/small",
     "language": "ru",
     "cpu_threads": 2,
-    "beam_size": 1
+    "beam_size": 3
   },
   "speaker": {
     "implementation": "Nomo-PVAD release-1.1",

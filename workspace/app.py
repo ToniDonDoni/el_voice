@@ -92,6 +92,8 @@ class VoiceSession:
     speaker_candidate_chunks: int = 0
     speaker_active: bool = False
     speaker_activity_gate: SpeakerActivityGate | None = None
+    speaker_score_invocations: int = 0
+    speaker_gate_skipped_batches: int = 0
     speaker_enrollment_kind: str | None = None
     speaker_enrollment_frames: list[np.ndarray] = field(default_factory=list)
     speaker_enrollment_received_samples: int = 0
@@ -1110,6 +1112,7 @@ async def speaker_audio_worker(session: VoiceSession) -> None:
                         np.concatenate(prior_frames) for prior_frames in pre_roll
                     )
                 if not should_score:
+                    session.speaker_gate_skipped_batches += 1
                     session.speaker_active = False
                     session.speaker_candidate.clear()
                     session.speaker_candidate_chunks = 0
@@ -1122,6 +1125,7 @@ async def speaker_audio_worker(session: VoiceSession) -> None:
             chunk = np.concatenate([frame for frame, _received_at in batch])
             try:
                 if profiles:
+                    session.speaker_score_invocations += 1
                     score, elapsed = await asyncio.to_thread(runtime.speaker_model.score, profiles, chunk)
                 else:
                     score, elapsed = 0.0, 0.0

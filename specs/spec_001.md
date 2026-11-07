@@ -23,7 +23,7 @@ Keep hands-free listening, interruption, enrollment, speaker rejection, transcri
 - [ ] During 10 short Russian utterances, the enrolled speaker is accepted, a non-enrolled speaker is rejected, and neither first syllables nor speech-end transitions are lost. Include quiet speech and pause/resume cases.
 - [ ] With the filter disabled, the ordinary Silero VAD path works unchanged and does not invoke speaker scoring.
 - [ ] After stopping the session, persistent voice-container CPU returns near its no-session baseline; there are no accumulating background workers, stale batches, or lingering transcription jobs.
-- [ ] Compare p50/p95 speech-end-to-first-audio latency, transcription quality, voice output, container CPU peaks, and memory before and after the changes. Any accuracy or latency regression must be documented and reviewed before merge.
+- [ ] Keep Whisper `beam_size=3` in the new branch and verify transcripts are at least as good as the baseline. Compare p50/p95 speech-end-to-first-audio latency, transcription quality, voice output, container CPU peaks, and memory before and after the changes. Any accuracy or latency regression must be documented and reviewed before merge.
 - [ ] Automated tests cover silent suppression, speech onset, endpoint/reentry, speaker gating, and configured inference concurrency.
 
 ## 4. Analysis
@@ -32,12 +32,12 @@ A continuous microphone stream is expected for hands-free voice activity detecti
 
 The rolling Nomo window recomputes up to 2.4 seconds for each 160 ms chunk while speech is active. Reducing inference frequency or replacing it with true incremental scoring would require model validation and should not be assumed safe without quality measurements.
 
-Whisper beam search and CPU-thread settings affect recognition quality and latency as well as CPU pressure. Cap concurrency conservatively, then compare accuracy and responsiveness on realistic Russian speech. PyTorch CPU thread counts are process-global: they cannot safely be treated as independent TTS and speaker pools.
+Whisper beam search affects recognition accuracy and should be preserved at `beam_size=3` until a separate, quality-controlled experiment warrants a change. CPU-thread settings affect peak CPU and latency, so benchmark them independently without reducing beam search. PyTorch CPU thread counts are process-global: they cannot safely be treated as independent TTS and speaker pools.
 
 ## 5. Proposed solution
 
 1. Add a per-session Silero VAD gate **before** optional Nomo-PVAD scoring. Use a separate detector instance from the turn-ending VAD, preserve existing audio frames/pre-roll for recognition, and retain fail-closed behavior. Do not run the Nomo network on confirmed silence; reset per-speaker rolling state across inactive periods so stale audio does not contaminate a new utterance.
-2. Bound inference parallelism: start with 2 CTranslate2 threads and `beam_size=1` for Whisper; configure PyTorch inference consistently at 2 threads for the current TTS/speaker combination. Keep values visible in configuration, and revert a quality-sensitive change if measurements do not justify it.
+2. Bound inference parallelism: start with 2 CTranslate2 threads while preserving `beam_size=3` for Whisper; configure PyTorch inference consistently at 2 threads for the current TTS/speaker combination. Benchmark latency and quality before accepting the thread-count changes. Do not reduce beam size as part of this optimization.
 3. Do not add an unconditional spin/sleep loop. Keep queue waits event-driven and continue to drain or discard stale audio under overload.
 4. Add targeted tests plus repeatable **before/after** measurement instructions. Do not claim measured improvements until the target Mac runs the measurements.
 5. Preserve current defaults for user privacy and session controls; no external model or dependency updates.

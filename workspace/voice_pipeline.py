@@ -353,7 +353,7 @@ class VoiceRuntime:
                 audio,
                 language=self.config["stt"]["language"],
                 task="transcribe",
-                beam_size=int(self.config["stt"].get("beam_size", 1)),
+                beam_size=int(self.config["stt"].get("beam_size", 3)),
                 best_of=1,
                 temperature=0.0,
                 condition_on_previous_text=False,

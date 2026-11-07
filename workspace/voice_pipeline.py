@@ -460,6 +460,8 @@ class VoiceRuntime:
                 "inference_ms": percentiles(inference),
                 "queue_drops": queue_drops,
                 "stale_drops": stale_drops,
+                "scoring_calls": getattr(session, "speaker_score_invocations", 0) if session else 0,
+                "silent_batches_skipped": getattr(session, "speaker_gate_skipped_batches", 0) if session else 0,
                 "queue_capacity_frames": int(self.config.get("speaker", {}).get("max_queue_frames", 32)),
             },
             "audio": self.config.get("audio", {"max_buffered_audio_ms": 2000}),

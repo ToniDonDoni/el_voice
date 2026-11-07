@@ -34,7 +34,3 @@
 - Limit STT/TTS CPU threads to 2; keep `beam_size=3`.
 - Add inference counters and regression tests.
 
-## 6. ToDo
-- [ ] Luna reviews changes.
-- [ ] Luna compares `main` and PR on the target Mac.
-- [ ] Validate acceptance criteria before merge.

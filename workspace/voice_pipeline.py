@@ -51,6 +51,8 @@ def _validate_settings(settings: dict[str, Any]) -> None:
         raise ValueError("tts.sample_rate must be 24000 for the browser audio protocol")
     integer("tts", "cpu_threads", 1, 64)
     integer("stt", "cpu_threads", 1, 64)
+    if "beam_size" in settings.get("stt", {}):
+        integer("stt", "beam_size", 1, 10)
     vad = settings.get("vad")
     if not isinstance(vad, dict):
         raise ValueError("vad must be an object")
@@ -351,7 +353,7 @@ class VoiceRuntime:
                 audio,
                 language=self.config["stt"]["language"],
                 task="transcribe",
-                beam_size=3,
+                beam_size=int(self.config["stt"].get("beam_size", 3)),
                 best_of=1,
                 temperature=0.0,
                 condition_on_previous_text=False,
@@ -458,6 +460,8 @@ class VoiceRuntime:
                 "inference_ms": percentiles(inference),
                 "queue_drops": queue_drops,
                 "stale_drops": stale_drops,
+                "scoring_calls": getattr(session, "speaker_score_invocations", 0) if session else 0,
+                "silent_batches_skipped": getattr(session, "speaker_gate_skipped_batches", 0) if session else 0,
                 "queue_capacity_frames": int(self.config.get("speaker", {}).get("max_queue_frames", 32)),
             },
             "audio": self.config.get("audio", {"max_buffered_audio_ms": 2000}),

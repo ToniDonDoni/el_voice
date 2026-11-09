@@ -6,6 +6,7 @@
 - Never copy code, installers, packages, model mirrors, or binary builds from the previously reviewed assistant author.
 - Use upstream Python packages and model publishers. Local Voice is offline and requires no API keys.
 - SPEC-002 explicitly adds opt-in Remote Voice: only the dedicated LLM service receives the provider key and outbound HTTPS; recognized text, bounded context, and search data may leave the Mac. Microphone audio and TTS remain local. Do not weaken this separation or pass the key to the voice or proxy services.
+- SPEC-007 adds typed text and explicitly pasted screenshots to Remote Voice. Images are held only for the current question, sent only by the remote LLM service, and never logged or persisted; log bounded image metadata instead. Local Voice accepts typed text but no image input.
 - Keep source code and project documentation in English.
 - Work on a dedicated branch. Preserve unrelated edits.
 

@@ -5,6 +5,14 @@ const clearButton = document.querySelector("#clear-button");
 const interruptToggle = document.querySelector("#interrupt-toggle");
 const webSearchToggle = document.querySelector("#web-search-toggle");
 const webSearchControl = document.querySelector("#web-search-control");
+const questionForm = document.querySelector("#question-form");
+const questionText = document.querySelector("#question-text");
+const sendQuestionButton = document.querySelector("#send-question-button");
+const pasteImageButton = document.querySelector("#paste-image-button");
+const removeImageButton = document.querySelector("#remove-image-button");
+const imagePreview = document.querySelector("#image-preview");
+const clipboardPreview = document.querySelector("#clipboard-preview");
+const composerStatus = document.querySelector("#composer-status");
 const speakerFilterToggle = document.querySelector("#speaker-filter-toggle");
 const speakerFilterStatus = document.querySelector("#speaker-filter-status");
 const speakerEnrollmentKind = document.querySelector("#speaker-enrollment-kind");
@@ -48,6 +56,110 @@ let unavailableAudioTurns = new Set();
 let fallbackTurns = new Set();
 let speakerEnrollmentHeld = false;
 let sessionSpeakerFilterEnabled = false;
+let remoteImageInput = false;
+let pendingClipboardImage = null;
+let clipboardOperation = 0;
+let clipboardImages = new Map();
+let connectingSocket = null;
+
+function clearClipboardImage(notify = true) {
+  clipboardOperation += 1;
+  if (notify && pendingClipboardImage && socket?.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "image_remove", attachment_id: pendingClipboardImage.id }));
+  }
+  pendingClipboardImage = null;
+  imagePreview.hidden = true;
+  clipboardPreview.removeAttribute?.("src");
+  sendQuestionButton.disabled = false;
+}
+
+async function ensureQuestionSession() {
+  if (socket?.readyState === WebSocket.OPEN) return;
+  if (connectingSocket) return connectingSocket;
+  sessionWanted = true;
+  stopping = false;
+  stopButton.hidden = false;
+  connectingSocket = connectSocket();
+  try { await connectingSocket; }
+  catch (error) {
+    sessionWanted = false;
+    stopButton.hidden = true;
+    throw error;
+  } finally { connectingSocket = null; }
+}
+
+async function clipboardPNG(blob) {
+  if (blob.size > 24 * 1024 * 1024) throw new Error("The clipboard image is too large (24 MiB maximum).");
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const data = canvas.toDataURL("image/png");
+    if ((data.length - "data:image/png;base64,".length) * 3 / 4 > 4 * 1024 * 1024) {
+      throw new Error("The screenshot exceeds 4 MiB. Copy a smaller area.");
+    }
+    return data;
+  } finally { bitmap.close(); }
+}
+
+async function stageClipboardImage(blob) {
+  if (!remoteImageInput) {
+    composerStatus.textContent = "Images require Remote Voice.";
+    return;
+  }
+  const operation = ++clipboardOperation;
+  sendQuestionButton.disabled = true;
+  composerStatus.textContent = "Preparing screenshot…";
+  try {
+    const image = await clipboardPNG(blob);
+    if (operation !== clipboardOperation) return;
+    await ensureQuestionSession();
+    if (operation !== clipboardOperation) return;
+    if (pendingClipboardImage) {
+      socket.send(JSON.stringify({ type: "image_remove", attachment_id: pendingClipboardImage.id }));
+    }
+    const id = crypto.randomUUID().replaceAll("-", "");
+    pendingClipboardImage = { id, image, ready: false };
+    clipboardImages.set(id, image);
+    while (clipboardImages.size > 8) clipboardImages.delete(clipboardImages.keys().next().value);
+    clipboardPreview.src = image;
+    imagePreview.hidden = false;
+    socket.send(JSON.stringify({ type: "image_attachment", attachment_id: id, image }));
+    composerStatus.textContent = "Uploading screenshot…";
+  } catch (error) {
+    if (operation === clipboardOperation) {
+      sendQuestionButton.disabled = Boolean(pendingClipboardImage && !pendingClipboardImage.ready);
+      composerStatus.textContent = error.message || "Could not paste the image. Try Cmd+V / Ctrl+V in the question field.";
+    }
+  }
+}
+
+async function sendTypedQuestion() {
+  const text = questionText.value.trim();
+  if (!text && !pendingClipboardImage) return;
+  if (pendingClipboardImage && !pendingClipboardImage.ready) {
+    composerStatus.textContent = "Wait for the screenshot to finish uploading.";
+    return;
+  }
+  if (text.length > 8000) {
+    composerStatus.textContent = "The question exceeds 8000 characters.";
+    return;
+  }
+  try {
+    // A typed question opens playback and the existing session without requesting a mic.
+    audioContext ||= new AudioContext();
+    await audioContext.resume();
+    await ensureQuestionSession();
+    socket.send(JSON.stringify({ type: "text_query", text }));
+    questionText.value = "";
+    composerStatus.textContent = "Question sent.";
+  } catch (_) {
+    composerStatus.textContent = "Could not send the question. Try again.";
+  }
+}
 
 function setStatus(label, state = "") {
   statusLabel.textContent = label;
@@ -246,7 +358,7 @@ function finishPlayback(turnId) {
   playbackBufferedMs.delete(turnId);
   audioSequence.delete(turnId);
   if (currentResponseTurn === turnId) currentResponseTurn = null;
-  liveLabel.textContent = sessionWanted ? "LISTENING" : "MIC OFF";
+  liveLabel.textContent = mediaStream ? "LISTENING" : sessionWanted ? "TEXT READY" : "MIC OFF";
   vadIndicator.classList.remove("active");
   setStatus("Listening for your next question", "ready");
 }
@@ -332,8 +444,9 @@ async function playPCM(buffer, metadata) {
       socket.send(JSON.stringify({ type: "playback_started", turn_id: turnId }));
     }
   }
-  liveLabel.textContent = "SPEAKING · LISTENING";
-  setStatus(interruptToggle.checked ? "Speaking · you can interrupt" : "Speaking · interruption is off", "busy");
+  liveLabel.textContent = mediaStream ? "SPEAKING · LISTENING" : "SPEAKING · MIC OFF";
+  setStatus(!mediaStream ? "Speaking · microphone off" : interruptToggle.checked
+    ? "Speaking · you can interrupt" : "Speaking · interruption is off", "busy");
 }
 
 async function handleServerMessage(data) {
@@ -379,8 +492,21 @@ async function handleServerMessage(data) {
       }
       detectSpeakerButton.disabled = !event.speaker_model_available;
       renderSpeakerProfiles(event.speaker_profiles || []);
-      setStatus("Listening for your next question", "ready");
-      liveLabel.textContent = "LISTENING";
+      setStatus(mediaStream ? "Listening for your next question" : "Ready for your question", "ready");
+      liveLabel.textContent = mediaStream ? "LISTENING" : "TEXT READY";
+      break;
+    case "image_attachment":
+      if (pendingClipboardImage?.id === event.attachment_id) {
+        pendingClipboardImage.ready = true;
+        sendQuestionButton.disabled = false;
+        composerStatus.textContent = `Screenshot ready (${event.width} × ${event.height}). Type or speak your question, or Send to describe it.`;
+      }
+      break;
+    case "image_error":
+      if (!event.attachment_id || pendingClipboardImage?.id === event.attachment_id) {
+        clearClipboardImage();
+      }
+      composerStatus.textContent = event.message || "Could not attach the screenshot.";
       break;
     case "speaker_filter_setting":
       speakerFilterToggle.checked = Boolean(event.enabled);
@@ -449,6 +575,19 @@ async function handleServerMessage(data) {
       break;
     case "transcript":
       addMessage("user", event.turn_id, event.text);
+      if (event.attachment_id) {
+        const image = clipboardImages.get(event.attachment_id);
+        if (image) {
+          const thumbnail = document.createElement("img");
+          thumbnail.src = image;
+          thumbnail.alt = "Screenshot sent with this question";
+          thumbnail.className = "message-image";
+          messageNodes.get(`user:${event.turn_id}`).article.append(thumbnail);
+          clipboardImages.delete(event.attachment_id);
+        }
+        if (pendingClipboardImage?.id === event.attachment_id) clearClipboardImage(false);
+        composerStatus.textContent = "Screenshot sent with your question.";
+      }
       break;
     case "generation_started":
       assistantBody(event.turn_id);
@@ -520,15 +659,15 @@ async function handleServerMessage(data) {
       break;
     }
     case "empty_turn":
-      liveLabel.textContent = "LISTENING";
+      liveLabel.textContent = mediaStream ? "LISTENING" : "TEXT READY";
       setStatus("I did not catch that. Try again.", "ready");
       if (event.turn_id && socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "playback_finished", turn_id: event.turn_id }));
       }
       break;
     case "listening":
-      setStatus("Listening for your next question", "ready");
-      liveLabel.textContent = "LISTENING";
+      setStatus(mediaStream ? "Listening for your next question" : "Ready for your question", "ready");
+      liveLabel.textContent = mediaStream ? "LISTENING" : "TEXT READY";
       break;
     case "error":
       setStatus(event.message || "A local voice component failed", "error");
@@ -572,6 +711,8 @@ function connectSocket() {
     ws.onclose = () => {
       if (socket !== ws) return;
       if (socket === ws) socket = null;
+      clearClipboardImage(false);
+      clipboardImages.clear();
       pendingAudio = null;
       stopPlayback();
       if (sessionWanted && !stopping) void reconnectSocket();
@@ -599,7 +740,7 @@ async function reconnectSocket() {
 }
 
 async function startSession() {
-  if (sessionWanted) return;
+  if (mediaStream) return;
   startButton.disabled = true;
   setStatus("Requesting microphone access…", "busy");
   try {
@@ -617,7 +758,7 @@ async function startSession() {
     echoCancellationSetting = inputSettings.echoCancellation === undefined
       ? "unsupported or unknown"
       : String(inputSettings.echoCancellation);
-    audioContext = new AudioContext();
+    audioContext ||= new AudioContext();
     await audioContext.resume();
     await audioContext.audioWorklet.addModule("/static/audio-capture.js");
     captureNode = new AudioWorkletNode(audioContext, "pcm16-capture", {
@@ -640,7 +781,7 @@ async function startSession() {
     stopButton.hidden = false;
     startButton.hidden = true;
     liveLabel.textContent = "CONNECTING";
-    await connectSocket();
+    await ensureQuestionSession();
   } catch (error) {
     sessionWanted = false;
     startButton.disabled = false;
@@ -673,6 +814,8 @@ async function releaseAudio() {
 async function stopSession(userInitiated = true) {
   stopping = true;
   sessionWanted = false;
+  clearClipboardImage(false);
+  clipboardImages.clear();
   pendingAudio = null;
   stopPlayback();
   if (socket && socket.readyState < WebSocket.CLOSING) {
@@ -694,6 +837,8 @@ async function stopSession(userInitiated = true) {
 }
 
 async function clearChat() {
+  clearClipboardImage();
+  clipboardImages.clear();
   for (const id of [...playbackSources.keys()]) stopPlayback(id);
   messages.replaceChildren();
   welcome.hidden = false;
@@ -709,7 +854,7 @@ async function clearChat() {
 function renderDiagnostics(status) {
   diagnostics.replaceChildren();
   const rows = [
-    ["Voice mode", status.mode === "remote" ? "Remote — text sent to provider" : "Local — offline inference"],
+    ["Voice mode", status.mode === "remote" ? "Remote — text and attached images sent to provider" : "Local — offline inference"],
     ["Platform", `${status.system || "—"} ${status.architecture || ""}`],
     ["Pipeline", status.stage || "unknown"],
     ["VAD", status.models?.vad || "unknown"],
@@ -761,6 +906,45 @@ webSearchToggle.addEventListener("change", event => {
     }));
   }
 });
+questionForm.addEventListener("submit", event => {
+  event.preventDefault();
+  void sendTypedQuestion();
+});
+questionText.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    void sendTypedQuestion();
+  }
+});
+questionText.addEventListener("paste", event => {
+  const image = [...(event.clipboardData?.items || [])].find(item => item.type.startsWith("image/"));
+  if (image) {
+    event.preventDefault();
+    const blob = image.getAsFile();
+    if (blob) void stageClipboardImage(blob);
+  }
+});
+pasteImageButton.addEventListener("click", async () => {
+  try {
+    if (!navigator.clipboard?.read) throw new Error("Clipboard access unavailable");
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      const type = item.types.find(value => value.startsWith("image/"));
+      if (type) {
+        await stageClipboardImage(await item.getType(type));
+        return;
+      }
+    }
+    composerStatus.textContent = "No image in the clipboard. Copy a screenshot first.";
+  } catch (_) {
+    questionText.focus();
+    composerStatus.textContent = "Paste the screenshot here with Cmd+V / Ctrl+V. Your browser did not allow clipboard reading.";
+  }
+});
+removeImageButton.addEventListener("click", () => {
+  clearClipboardImage();
+  composerStatus.textContent = "Screenshot removed.";
+});
 
 function formatMetric(metric) {
   if (!metric || metric.p50 == null) return "not measured";
@@ -794,17 +978,20 @@ async function pollStatus() {
       detectSpeakerButton.disabled = true;
     }
     const remote = status.mode === "remote";
+    remoteImageInput = remote;
+    pasteImageButton.hidden = !remote;
+    questionText.placeholder = remote ? "Type a question or paste a screenshot…" : "Type your question…";
     webSearchControl.hidden = !remote;
     const badge = document.querySelector("#mode-badge");
     badge.replaceChildren(Object.assign(document.createElement("span"), { className: "local-dot" }));
-    badge.append(document.createTextNode(remote ? "REMOTE · TEXT SHARED" : "LOCAL · PRIVATE"));
+    badge.append(document.createTextNode(remote ? "REMOTE · TEXT + IMAGES" : "LOCAL · PRIVATE"));
     const note = document.querySelector("#privacy-note p");
     if (remote) {
       note.replaceChildren();
       const strong = document.createElement("strong");
-      strong.textContent = "Remote Voice sends text to OpenCode Go.";
+      strong.textContent = "Remote Voice sends text and attached screenshots to OpenCode Go.";
       note.append(strong, document.createTextNode(
-        " Microphone audio stays local. Recognized text and bounded history go to OpenCode Go; search queries and result snippets may be sent to OpenCode Go and DuckDuckGo. Use headphones; echo cancellation is best effort."
+        " Microphone audio stays local. Typed or recognized text, attached screenshots, and bounded text history go to OpenCode Go; search queries and result snippets may be sent to OpenCode Go and DuckDuckGo. Use headphones; echo cancellation is best effort."
       ));
       document.querySelector("#footer-mode").textContent = "Remote text inference and web search · Speech audio stays local";
     } else {

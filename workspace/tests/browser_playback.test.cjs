@@ -28,6 +28,7 @@ class FakeAudioContext {
     this.gains = [];
   }
   async close() { this.state = "closed"; }
+  async resume() { this.state = "running"; }
   createBuffer(_channels, length, sampleRate) {
     return { duration: length / sampleRate, getChannelData: () => new Float32Array(length) };
   }
@@ -90,7 +91,14 @@ function harness(mode = "local") {
       }
       return elements.get(selector);
     },
-    createElement() { return new Element(); },
+    createElement(tag) {
+      const element = new Element();
+      if (tag === "canvas") {
+        element.getContext = () => ({ drawImage() {} });
+        element.toDataURL = () => "data:image/png;base64,test";
+      }
+      return element;
+    },
   };
   const window = { events: new Map(), addEventListener(name, callback) { this.events.set(name, callback); } };
   const source = appSource + `
@@ -105,12 +113,17 @@ window.__elVoiceTest = {
   renderDiagnostics,
   renderBuildRevision,
   pollStatus,
+  sendTypedQuestion,
+  stageClipboardImage,
+  clearChat,
   setSessionWanted(value) { sessionWanted = value; },
   getQueueEnd(turnId) { return nextPlaybackTime.get(turnId) || 0; },
   getAssistantText(turnId) { return messageNodes.get("assistant:" + turnId)?.body.textContent || ""; },
 };`;
   vm.runInNewContext(source, {
     document, window, WebSocket: FakeWebSocket, AudioContext: FakeAudioContext,
+    crypto: require("node:crypto").webcrypto,
+    createImageBitmap: async () => ({ width: 320, height: 180, close() {} }),
     location: { protocol: "http:", host: "localhost" },
     fetch: async () => ({ json: async () => ({ ready: true, stage: "ready", mode, models: {}, metrics: {},
       audio: { max_buffered_audio_ms: 2000 } }) }),
@@ -134,6 +147,43 @@ function makePacket(turnHex, sequence, sampleRate, validMagic = true) {
 }
 
 async function run() {
+  await check("text send opens a session without microphone capture", async () => {
+    const { api, elements } = harness("remote");
+    await api.pollStatus();
+    elements.get("#question-text").value = "Describe this boss";
+    await api.sendTypedQuestion();
+    const ws = FakeWebSocket.instances.at(-1);
+    assert.equal(JSON.parse(ws.sent[0]).type, "start");
+    assert.deepEqual(JSON.parse(ws.sent.at(-1)), { type: "text_query", text: "Describe this boss" });
+    assert.equal(elements.get("#question-text").value, "");
+    await api.stopSession(false);
+  });
+  await check("clipboard preview is acknowledged and consumed by exactly one question", async () => {
+    const { api, elements } = harness("remote");
+    await api.pollStatus();
+    await api.stageClipboardImage({ size: 100 });
+    const ws = FakeWebSocket.instances.at(-1);
+    const upload = JSON.parse(ws.sent.at(-1));
+    assert.equal(upload.type, "image_attachment");
+    assert.equal(elements.get("#image-preview").hidden, false);
+    assert.equal(elements.get("#send-question-button").disabled, true);
+    await api.handleServerMessage(JSON.stringify({ type: "image_attachment", state: "ready",
+      attachment_id: upload.attachment_id, width: 320, height: 180 }));
+    assert.equal(elements.get("#send-question-button").disabled, false);
+    await api.handleServerMessage(JSON.stringify({ type: "transcript", text: "Describe",
+      turn_id: "image-question", attachment_id: upload.attachment_id }));
+    assert.equal(elements.get("#image-preview").hidden, true);
+    assert.match(elements.get("#composer-status").textContent, /sent/);
+    await api.stopSession(false);
+  });
+  await check("Local Voice has text input but rejects clipboard images", async () => {
+    const { api, elements } = harness("local");
+    await api.pollStatus();
+    assert.equal(elements.get("#paste-image-button").hidden, true);
+    await api.stageClipboardImage({ size: 100 });
+    assert.match(elements.get("#composer-status").textContent, /Remote Voice/);
+    assert.ok(!/type="file"/.test(html), "clipboard input must not add a file picker");
+  });
   await check("browser audio queue honors the API limit", async () => {
     const { api } = harness();
     const audio = new FakeAudioContext();

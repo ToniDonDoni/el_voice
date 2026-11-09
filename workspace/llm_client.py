@@ -56,7 +56,8 @@ class LLMServiceClient:
 
     async def stream(self, session_id: str, turn_id: str, text: str,
                      cancel_event: threading.Event,
-                     search_enabled: bool = False) -> AsyncIterator[dict[str, Any]]:
+                     search_enabled: bool = False,
+                     image: str | None = None) -> AsyncIterator[dict[str, Any]]:
         import httpx
 
         endpoint = f"{self.base_url}/v1/sessions/{session_id}/turns/{turn_id}/stream"
@@ -66,11 +67,13 @@ class LLMServiceClient:
         response_chars = 0
         log_structured(logger, "llm_client_stream_started", session_id=session_id,
                        turn_id=turn_id, trace_id=turn_id)
+        payload = {"text": text, "trace_id": turn_id, "search_enabled": search_enabled}
+        if image is not None:
+            payload["image"] = image
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
             try:
                 async with client.stream(
-                    "POST", endpoint, json={"text": text, "trace_id": turn_id,
-                                             "search_enabled": search_enabled},
+                    "POST", endpoint, json=payload,
                 ) as response:
                     log_structured(logger, "llm_client_response_headers", session_id=session_id,
                                    turn_id=turn_id, trace_id=turn_id,

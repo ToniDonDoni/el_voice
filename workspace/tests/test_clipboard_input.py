@@ -155,3 +155,18 @@ class ImageValidationTests(unittest.TestCase):
                       "data:image/png;base64,broken", "x" * (MAX_IMAGE_DATA_CHARS + 1)]:
             with self.subTest(value=value[:30]), self.assertRaises(ValueError):
                 image_metadata(value)
+
+    def test_rejects_png_with_valid_chunk_crc_but_invalid_pixel_stream(self):
+        import base64
+        import struct
+        import zlib
+
+        def chunk(kind, data):
+            return struct.pack("!I", len(data)) + kind + data + struct.pack("!I", zlib.crc32(kind + data))
+
+        png = (b"\x89PNG\r\n\x1a\n"
+               + chunk(b"IHDR", struct.pack("!IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+               + chunk(b"IDAT", b"not a zlib stream")
+               + chunk(b"IEND", b""))
+        with self.assertRaisesRegex(ValueError, "pixel data"):
+            image_metadata("data:image/png;base64," + base64.b64encode(png).decode())

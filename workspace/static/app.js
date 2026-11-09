@@ -73,6 +73,14 @@ function clearClipboardImage(notify = true) {
   sendQuestionButton.disabled = false;
 }
 
+function releaseMessageImages() {
+  for (const thumbnail of messages.querySelectorAll?.(".message-image") || []) {
+    thumbnail.removeAttribute("src");
+    thumbnail.remove();
+  }
+  clipboardImages.clear();
+}
+
 async function ensureQuestionSession() {
   if (socket?.readyState === WebSocket.OPEN) return;
   if (connectingSocket) return connectingSocket;
@@ -631,6 +639,7 @@ async function handleServerMessage(data) {
       addMessageStatus(event.turn_id, "Fallback response shown; voice synthesis failed");
       break;
     case "turn_complete":
+      releaseMessageImages();
       turnComplete.add(event.turn_id);
       addMessageStatus(event.turn_id, unavailableAudioTurns.has(event.turn_id)
         ? "Fallback response shown; voice synthesis failed"
@@ -713,6 +722,7 @@ function connectSocket() {
       if (socket === ws) socket = null;
       clearClipboardImage(false);
       clipboardImages.clear();
+      releaseMessageImages();
       pendingAudio = null;
       stopPlayback();
       if (sessionWanted && !stopping) void reconnectSocket();
@@ -808,6 +818,7 @@ async function releaseAudio() {
   if (audioContext) {
     await audioContext.close().catch(() => {});
     audioContext = null;
+    outputGain = null;
   }
 }
 
@@ -816,6 +827,7 @@ async function stopSession(userInitiated = true) {
   sessionWanted = false;
   clearClipboardImage(false);
   clipboardImages.clear();
+  releaseMessageImages();
   pendingAudio = null;
   stopPlayback();
   if (socket && socket.readyState < WebSocket.CLOSING) {

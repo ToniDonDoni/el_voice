@@ -31,6 +31,8 @@ def image_metadata(data_url: str) -> dict:
     if len(raw) > MAX_IMAGE_BYTES or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
         raise ValueError("The clipboard image is invalid or too large.")
     offset, width, height, image_data = 8, 0, 0, False
+    bit_depth = color_type = interlace = None
+    compressed = bytearray()
     while offset + 12 <= len(raw):
         size = struct.unpack_from("!I", raw, offset)[0]
         kind = raw[offset + 4:offset + 8]
@@ -42,13 +44,28 @@ def image_metadata(data_url: str) -> dict:
         if offset == 8:
             if kind != b"IHDR" or size != 13:
                 break
-            width, height = struct.unpack_from("!II", raw, offset + 8)
+            width, height, bit_depth, color_type, compression, filtering, interlace = struct.unpack_from("!IIBBBBB", raw, offset + 8)
             if not (0 < width <= MAX_IMAGE_SIDE and 0 < height <= MAX_IMAGE_SIDE):
                 raise ValueError("The image must be at most 2048 pixels per side.")
+            channels = {0: 1, 2: 3, 4: 2, 6: 4}.get(color_type)
+            if bit_depth != 8 or channels is None or compression != 0 or filtering != 0 or interlace != 0:
+                raise ValueError("The clipboard PNG encoding is not supported.")
         if kind == b"IDAT" and size:
             image_data = True
+            compressed.extend(raw[offset + 8:end])
         if kind == b"IEND":
             if size == 0 and end + 4 == len(raw) and image_data:
+                expected = height * (1 + width * channels)
+                try:
+                    decoder = zlib.decompressobj()
+                    pixels = decoder.decompress(compressed, expected + 1)
+                except zlib.error:
+                    raise ValueError("The clipboard PNG pixel data is invalid.") from None
+                if len(pixels) != expected or decoder.unconsumed_tail or not decoder.eof:
+                    raise ValueError("The clipboard PNG pixel data is invalid.")
+                stride = width * channels + 1
+                if any(pixels[row * stride] > 4 for row in range(height)):
+                    raise ValueError("The clipboard PNG pixel data is invalid.")
                 return {"mime_type": "image/png", "bytes": len(raw), "width": width,
                         "height": height, "sha256": hashlib.sha256(raw).hexdigest()}
             break

@@ -60,12 +60,23 @@ let remoteImageInput = false;
 let pendingClipboardImage = null;
 let clipboardOperation = 0;
 let clipboardImages = new Map();
+let awaitingTranscriptImages = new Set();
 let connectingSocket = null;
+
+function releaseAwaitingImages(retainId = null) {
+  for (const id of awaitingTranscriptImages) {
+    if (id !== pendingClipboardImage?.id && id !== retainId) clipboardImages.delete(id);
+  }
+  awaitingTranscriptImages.clear();
+}
 
 function clearClipboardImage(notify = true) {
   clipboardOperation += 1;
   if (notify && pendingClipboardImage && socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: "image_remove", attachment_id: pendingClipboardImage.id }));
+  }
+  if (pendingClipboardImage && !awaitingTranscriptImages.has(pendingClipboardImage.id)) {
+    clipboardImages.delete(pendingClipboardImage.id);
   }
   pendingClipboardImage = null;
   imagePreview.hidden = true;
@@ -78,7 +89,6 @@ function releaseMessageImages() {
     thumbnail.removeAttribute("src");
     thumbnail.remove();
   }
-  clipboardImages.clear();
 }
 
 async function ensureQuestionSession() {
@@ -128,6 +138,9 @@ async function stageClipboardImage(blob) {
     if (operation !== clipboardOperation) return;
     if (pendingClipboardImage) {
       socket.send(JSON.stringify({ type: "image_remove", attachment_id: pendingClipboardImage.id }));
+      if (!awaitingTranscriptImages.has(pendingClipboardImage.id)) {
+        clipboardImages.delete(pendingClipboardImage.id);
+      }
     }
     const id = crypto.randomUUID().replaceAll("-", "");
     pendingClipboardImage = { id, image, ready: false };
@@ -161,6 +174,7 @@ async function sendTypedQuestion() {
     audioContext ||= new AudioContext();
     await audioContext.resume();
     await ensureQuestionSession();
+    if (pendingClipboardImage) awaitingTranscriptImages.add(pendingClipboardImage.id);
     socket.send(JSON.stringify({ type: "text_query", text }));
     questionText.value = "";
     composerStatus.textContent = "Question sent.";
@@ -571,6 +585,7 @@ async function handleServerMessage(data) {
       setStatus("Listening to your question", "busy");
       break;
     case "speech_ended":
+      if (pendingClipboardImage) awaitingTranscriptImages.add(pendingClipboardImage.id);
       vadIndicator.classList.remove("active");
       liveLabel.textContent = "PROCESSING";
       setStatus("Recognizing your speech…", "busy");
@@ -582,6 +597,7 @@ async function handleServerMessage(data) {
       addMessageStatus(event.turn_id, "Speech ignored while the current reply finishes");
       break;
     case "transcript":
+      releaseAwaitingImages(event.attachment_id);
       addMessage("user", event.turn_id, event.text);
       if (event.attachment_id) {
         const image = clipboardImages.get(event.attachment_id);
@@ -668,6 +684,7 @@ async function handleServerMessage(data) {
       break;
     }
     case "empty_turn":
+      releaseAwaitingImages();
       liveLabel.textContent = mediaStream ? "LISTENING" : "TEXT READY";
       setStatus("I did not catch that. Try again.", "ready");
       if (event.turn_id && socket?.readyState === WebSocket.OPEN) {

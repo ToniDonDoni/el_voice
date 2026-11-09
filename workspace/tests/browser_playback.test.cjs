@@ -115,6 +115,8 @@ window.__elVoiceTest = {
   pollStatus,
   sendTypedQuestion,
   stageClipboardImage,
+  clearClipboardImage,
+  getCachedImageIds() { return [...clipboardImages.keys()]; },
   clearChat,
   setSessionWanted(value) { sessionWanted = value; },
   getQueueEnd(turnId) { return nextPlaybackTime.get(turnId) || 0; },
@@ -174,6 +176,21 @@ async function run() {
       turn_id: "image-question", attachment_id: upload.attachment_id }));
     assert.equal(elements.get("#image-preview").hidden, true);
     assert.match(elements.get("#composer-status").textContent, /sent/);
+    await api.stopSession(false);
+  });
+  await check("removed and replaced screenshots leave the attachment cache", async () => {
+    const { api } = harness("remote");
+    await api.pollStatus();
+    await api.stageClipboardImage({ size: 100 });
+    const first = api.getCachedImageIds()[0];
+    api.clearClipboardImage();
+    assert.equal(api.getCachedImageIds().length, 0);
+    await api.stageClipboardImage({ size: 100 });
+    const second = api.getCachedImageIds()[0];
+    await api.stageClipboardImage({ size: 100 });
+    assert.notEqual(api.getCachedImageIds()[0], second);
+    assert.equal(api.getCachedImageIds().length, 1);
+    assert.ok(!api.getCachedImageIds().includes(first));
     await api.stopSession(false);
   });
   await check("Local Voice has text input but rejects clipboard images", async () => {

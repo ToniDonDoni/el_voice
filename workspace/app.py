@@ -35,6 +35,7 @@ from voice_pipeline import (
 )
 from speaker_profiles import ProfileStore
 from speaker_activity_gate import SpeakerActivityGate
+from image_attachment import MAX_IMAGE_DATA_CHARS, image_metadata
 
 logging.getLogger("uvicorn.access").disabled = True
 logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
@@ -70,6 +71,8 @@ class VoiceSession:
     current_turn: Turn | None = None
     interrupt_enabled: bool = True
     search_enabled: bool = False
+    pending_image: str | None = None
+    pending_image_id: str | None = None
     ignored_speech: bool = False
     turns: dict[str, Turn] = field(default_factory=dict)
     history: list[dict[str, str]] = field(default_factory=list)
@@ -330,10 +333,12 @@ def _speakable_chunks(buffer: str, max_chars: int = 80, min_chars: int = 18) -> 
 async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
     """Consume a bounded text/tool/source event stream from the LLM service."""
     if getattr(runtime, "llm_client", None) is not None:
+        options = {"image": turn.image} if turn.image is not None else {}
         stream = runtime.llm_stream(
             user_text, turn.cancel_event, session.history,
             session_id=session.session_id, turn_id=turn.turn_id,
             search_enabled=turn.search_enabled,
+            **options,
         )
     else:
         stream = runtime.llm_stream(user_text, turn.cancel_event, session.history)
@@ -384,7 +389,8 @@ async def _llm_items(session: VoiceSession, turn: Turn, user_text: str):
         await asyncio.shield(worker_task)
 
 
-async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> None:
+async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray | None,
+                       text_input: str | None = None) -> None:
     answer_parts: list[str] = []
     transcript: str | None = None
     reply_logged = False
@@ -393,7 +399,8 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
     tts_chunk_count = 0
     try:
         stage = "stt"
-        text = await asyncio.to_thread(runtime.transcribe, audio, turn.cancel_event)
+        text = (text_input if text_input is not None else
+                await asyncio.to_thread(runtime.transcribe, audio, turn.cancel_event))
         transcript = text
         if not session.is_current(turn):
             log_event("turn_discarded_after_transcription", session_id=session.session_id, turn_id=turn.turn_id)
@@ -403,10 +410,19 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             await queue_event(session, {"type": "empty_turn", "turn_id": turn.turn_id}, turn.turn_id)
             return
 
-        log_event("user_transcript", session_id=session.session_id, turn_id=turn.turn_id, text=text)
+        # Consume only after a nonempty question, so failed/empty STT keeps the image.
+        # This atomic snapshot also prevents later pastes from changing a running turn.
+        attachment_id = getattr(session, "pending_image_id", None)
+        turn.image, session.pending_image = getattr(session, "pending_image", None), None
+        session.pending_image_id = None
+        metadata = image_metadata(turn.image) if turn.image else None
+        log_event("user_transcript", session_id=session.session_id, turn_id=turn.turn_id,
+                  text=text, input_source="text" if text_input is not None else "voice",
+                  attachment_id=attachment_id, image=metadata)
 
         await queue_event(
-            session, {"type": "transcript", "turn_id": turn.turn_id, "text": text}, turn.turn_id
+            session, {"type": "transcript", "turn_id": turn.turn_id, "text": text,
+                      "attachment_id": attachment_id}, turn.turn_id
         )
         await queue_event(session, {"type": "generation_started", "turn_id": turn.turn_id}, turn.turn_id)
         text_buffer = ""
@@ -576,6 +592,7 @@ async def process_turn(session: VoiceSession, turn: Turn, audio: np.ndarray) -> 
             reply_logged = True
             await queue_event(session, {"type": "turn_complete", "turn_id": turn.turn_id}, turn.turn_id)
     finally:
+        turn.image = None
         if answer_parts and not reply_logged and not session.is_current(turn):
             log_event("assistant_reply_interrupted", session_id=session.session_id, turn_id=turn.turn_id,
                       text="".join(answer_parts).strip())
@@ -648,7 +665,7 @@ async def synthesize_and_queue(session: VoiceSession, turn: Turn, text: str) -> 
 
 
 async def receive_control(session: VoiceSession, payload: str) -> None:
-    if len(payload.encode("utf-8", errors="ignore")) > 4096:
+    if len(payload) > MAX_IMAGE_DATA_CHARS + 1024:
         await queue_event(session, {"type": "error", "message": "Control message is too large."})
         return
     try:
@@ -661,8 +678,65 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
         return
     kind = event.get("type")
     turn_id = event.get("turn_id")
+    if kind != "image_attachment" and len(payload.encode("utf-8", errors="ignore")) > 32768:
+        await queue_event(session, {"type": "error", "message": "Control message is too large."})
+        return
+    if kind not in {"image_attachment", "text_query"} and len(payload.encode("utf-8", errors="ignore")) > 4096:
+        await queue_event(session, {"type": "error", "message": "Control message is too large."})
+        return
     if not isinstance(kind, str):
         await queue_event(session, {"type": "error", "message": "Control type must be a string."})
+        return
+    if kind == "image_attachment":
+        if getattr(runtime, "mode", "local") != "remote":
+            await queue_event(session, {"type": "image_error", "message": "Images require Remote Voice."})
+            return
+        attachment_id = event.get("attachment_id")
+        if not isinstance(attachment_id, str) or not re.fullmatch(r"[0-9a-f]{32}", attachment_id):
+            await queue_event(session, {"type": "image_error", "message": "Invalid image identity."})
+            return
+        try:
+            metadata = image_metadata(event.get("image"))
+        except ValueError as exc:
+            await queue_event(session, {"type": "image_error", "attachment_id": attachment_id,
+                                        "message": str(exc)})
+            return
+        session.pending_image = event["image"]
+        session.pending_image_id = attachment_id
+        log_event("clipboard_image_received", session_id=session.session_id,
+                  attachment_id=attachment_id, **metadata)
+        await queue_event(session, {"type": "image_attachment", "attachment_id": attachment_id,
+                                    "state": "ready", **metadata})
+        return
+    if kind == "image_remove":
+        if event.get("attachment_id") == session.pending_image_id:
+            session.pending_image = None
+            session.pending_image_id = None
+        return
+    if kind == "text_query":
+        text = event.get("text")
+        if not isinstance(text, str) or len(text) > 8000:
+            await queue_event(session, {"type": "error", "message": "Enter a question of at most 8000 characters."})
+            return
+        text = text.strip()
+        if not text and session.pending_image:
+            text = "Опиши, что на этой картинке."
+        if not text:
+            await queue_event(session, {"type": "error", "message": "Enter a question or paste an image."})
+            return
+        if session.speaker_enrollment_kind:
+            await queue_event(session, {"type": "error", "message": "Finish speaker enrollment before sending a question."})
+            return
+        # A typed Send explicitly replaces the current reply, regardless of the
+        # microphone-only interrupt preference. Discard any half-captured utterance.
+        session.vad = runtime.new_vad()
+        session.ignored_speech = False
+        turn = await activate_turn(session)
+        turn.speech_end_at = time.monotonic()
+        task = asyncio.create_task(process_turn(session, turn, None, text_input=text),
+                                   name=f"text-turn-{turn.turn_id}")
+        session.tasks.add(task)
+        task.add_done_callback(session.tasks.discard)
         return
     if kind and kind.startswith("speaker_"):
         now = time.monotonic()
@@ -931,6 +1005,8 @@ async def receive_control(session: VoiceSession, payload: str) -> None:
                       session.audio_sent_sequence, session.audio_packet_durations):
             state.pop(turn_id, None)
     elif kind == "clear_history":
+        session.pending_image = None
+        session.pending_image_id = None
         session.history.clear()
         await clear_llm_context(session.session_id)
 
@@ -1000,6 +1076,29 @@ async def stop_speaker_enrollment_progress(session: VoiceSession) -> None:
             await task
 
 
+async def activate_turn(session: VoiceSession) -> Turn:
+    """Replace the active turn and cancel its queued speech before a new question."""
+    previous = session.current_turn
+    turn = Turn(turn_id=uuid.uuid4().hex, search_enabled=session.search_enabled)
+    session.current_turn = turn
+    session.remember_turn(turn)
+    if previous:
+        log_event("barge_in", session_id=session.session_id, old_turn_id=previous.turn_id,
+                  new_turn_id=turn.turn_id, playback_was_active=previous.playback_started)
+        previous.cancel_event.set()
+        session.browser_buffered_ms = 0.0
+        session.audio_capacity.set()
+        for state_name in ("audio_sequence", "audio_ack_sequence", "audio_ack_buffered_ms",
+                           "audio_ack_consumed_ms", "audio_sent_sequence", "audio_packet_durations"):
+            getattr(session, state_name).pop(previous.turn_id, None)
+        if previous.playback_started:
+            session.interrupt_pending[previous.turn_id] = turn.speech_onset_at
+        clear_outgoing(session)
+        await queue_event(session, {"type": "interrupt", "turn_id": previous.turn_id,
+                                    "next_turn_id": turn.turn_id})
+    return turn
+
+
 async def _process_audio_frame(session: VoiceSession, frame: np.ndarray) -> None:
     if session.speaker_enrollment_kind:
         return
@@ -1013,25 +1112,9 @@ async def _process_audio_frame(session: VoiceSession, frame: np.ndarray) -> None
             await queue_event(session, {"type": "speech_ignored", "turn_id": previous.turn_id})
             return
         session.ignored_speech = False
-        turn = Turn(turn_id=uuid.uuid4().hex, search_enabled=session.search_enabled)
-        session.current_turn = turn
-        session.remember_turn(turn)
+        turn = await activate_turn(session)
         log_event("speech_started", session_id=session.session_id, turn_id=turn.turn_id,
                   vad_probability=round(score, 3), speaker_filter=session.speaker_filter_enabled)
-        if previous:
-            log_event("barge_in", session_id=session.session_id, old_turn_id=previous.turn_id,
-                      new_turn_id=turn.turn_id, playback_was_active=previous.playback_started)
-            previous.cancel_event.set()
-            session.browser_buffered_ms = 0.0
-            session.audio_capacity.set()
-            for state_name in ("audio_sequence", "audio_ack_sequence", "audio_ack_buffered_ms",
-                               "audio_ack_consumed_ms", "audio_sent_sequence", "audio_packet_durations"):
-                getattr(session, state_name).pop(previous.turn_id, None)
-            if previous.playback_started:
-                session.interrupt_pending[previous.turn_id] = turn.speech_onset_at
-            clear_outgoing(session)
-            await queue_event(session, {"type": "interrupt", "turn_id": previous.turn_id,
-                                        "next_turn_id": turn.turn_id})
         await queue_event(session, {"type": "speech_started", "turn_id": turn.turn_id,
                                     "vad_probability": round(score, 3)}, turn.turn_id)
     elif event == "end" and completed_audio is not None and session.current_turn:
@@ -1342,6 +1425,8 @@ async def voice_socket(websocket: WebSocket) -> None:
             session.speaker_enrollment_kind = None
             session.speaker_enrollment_frames.clear()
         session.stopped = True
+        session.pending_image = None
+        session.pending_image_id = None
         for turn in session.turns.values():
             turn.cancel_event.set()
         sender.cancel()

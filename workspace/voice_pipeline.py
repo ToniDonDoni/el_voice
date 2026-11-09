@@ -240,6 +240,7 @@ class Turn:
     speech_onset_at: float = field(default_factory=time.monotonic)
     speech_end_at: float | None = None
     playback_started: bool = False
+    image: str | None = None
 
 
 class VoiceRuntime:
@@ -383,10 +384,12 @@ class VoiceRuntime:
         session_id: str = "",
         turn_id: str = "",
         search_enabled: bool = False,
+        image: str | None = None,
     ) -> Any:
         async for event in self.llm_client.stream(
             session_id, turn_id, user_text, cancel_event,
             search_enabled=search_enabled,
+            image=image,
         ):
             yield event
 

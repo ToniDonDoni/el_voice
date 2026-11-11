@@ -24,6 +24,35 @@ from llm_service.search import SearchFailure, WebSearch, make_langchain_search_t
 
 @unittest.skipUnless(LANGCHAIN_AVAILABLE, "Install the pinned LangChain dependencies to run graph tests")
 class LangChainGraphTests(unittest.IsolatedAsyncioTestCase):
+    async def test_clipboard_image_stays_with_question_through_final_model_call(self):
+        from image_fixtures import image_url
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, _tools, **_kwargs):
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                seen.append(messages)
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        seen = []
+        provider = object.__new__(OpenCodeLangChainProvider)
+        provider.model = Model(responses=[
+            AIMessage(content="", tool_calls=[{
+                "id": "finish", "name": "begin_final_answer", "args": {}}]),
+            AIMessage(content="Red square and blue circle."),
+        ])
+        provider.tool_iterations = 3
+        image = image_url()
+        events = [event async for event in provider.stream(
+            "Describe", [], asyncio.Event(), image=image)]
+        self.assertEqual(events[-1]["text"], "Red square and blue circle.")
+        self.assertEqual(len(seen), 2)
+        for messages in seen:
+            question = next(message for message in messages if message.type == "human")
+            self.assertEqual(question.content, [{"type": "text", "text": "Describe"},
+                {"type": "image_url", "image_url": {"url": image}}])
+
     async def test_search_tool_is_registered_only_for_turns_that_enable_it(self):
         captured = []
 

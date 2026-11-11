@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark">
   <meta name="el-voice-csrf" content="__EL_VOICE_CSRF_TOKEN__">
   <title>EL Voice — Dota companion</title>
-  <link rel="stylesheet" href="/static/app.css?v=speaker-filter-20261106">
-  <script src="/static/app.js?v=speaker-enrollment-recording-20261106" defer></script>
+  <link rel="stylesheet" href="/static/app.css?v=clipboard-input-20261109">
+  <script src="/static/app.js?v=clipboard-input-20261109" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -37,6 +37,19 @@
           <span>For voice output, connect headphones.</span>
         </div>
       </div>
+      <form id="question-form" class="question-composer" aria-label="Send a question">
+        <label for="question-text">Your question</label>
+        <textarea id="question-text" rows="2" maxlength="8000" placeholder="Type a question or paste a screenshot…" aria-describedby="composer-status"></textarea>
+        <div id="image-preview" class="image-preview" hidden>
+          <img id="clipboard-preview" alt="Screenshot attached to your next question">
+          <button id="remove-image-button" class="text-button" type="button">Remove image</button>
+        </div>
+        <div class="composer-actions">
+          <span id="composer-status" role="status" aria-live="polite">Enter sends · Shift+Enter adds a line</span>
+          <button id="paste-image-button" class="secondary-button" type="button" hidden>Paste image</button>
+          <button id="send-question-button" class="primary-button" type="submit">Send</button>
+        </div>
+      </form>
       <div class="controls">
         <button id="start-button" class="primary-button" type="button" disabled>
           <span class="mic-icon" aria-hidden="true">●</span><span>Start talking</span>

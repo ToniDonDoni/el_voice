@@ -492,6 +492,7 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
         started = threading.Event()
         cancelled_first = threading.Event()
         counter_lock = threading.Lock()
+        inference_lock = threading.Lock()
 
         class SlowRuntime(StubRuntime):
             def __init__(self):
@@ -501,21 +502,25 @@ class TurnRegressionTests(unittest.IsolatedAsyncioTestCase):
                 self.max_active = 0
 
             def transcribe(self, _audio, cancel_event=None):
-                with counter_lock:
-                    self.calls += 1
-                    call = self.calls
-                    self.active += 1
-                    self.max_active = max(self.max_active, self.active)
-                try:
-                    if call == 1:
-                        started.set()
-                        if cancel_event is not None:
-                            cancel_event.wait(timeout=2)
-                            cancelled_first.set()
-                    return f"question {call}"
-                finally:
+                # Match VoiceRuntime's shared STT inference lock: a replacement
+                # turn may arrive before cancelled inference exits, but must not
+                # enter the Whisper engine concurrently with that old worker.
+                with inference_lock:
                     with counter_lock:
-                        self.active -= 1
+                        self.calls += 1
+                        call = self.calls
+                        self.active += 1
+                        self.max_active = max(self.max_active, self.active)
+                    try:
+                        if call == 1:
+                            started.set()
+                            if cancel_event is not None:
+                                cancel_event.wait(timeout=2)
+                                cancelled_first.set()
+                        return f"question {call}"
+                    finally:
+                        with counter_lock:
+                            self.active -= 1
 
         runtime = SlowRuntime()
         app.runtime = runtime

@@ -11,8 +11,10 @@ from contextlib import aclosing, asynccontextmanager, suppress
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, field_validator
+from image_attachment import MAX_IMAGE_DATA_CHARS, image_metadata
 
 from .context import ConversationStore
 from .local_provider import LocalGemmaProvider
@@ -34,6 +36,14 @@ class TurnRequest(BaseModel):
     text: str = Field(min_length=1, max_length=MAX_USER_TEXT_CHARS)
     trace_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     search_enabled: StrictBool = False
+    image: str | None = Field(default=None, max_length=MAX_IMAGE_DATA_CHARS)
+
+    @field_validator("image")
+    @classmethod
+    def validate_image(cls, value):
+        if value is not None:
+            image_metadata(value)
+        return value
 
 
 class BackendUnavailable(RuntimeError):
@@ -122,6 +132,11 @@ def create_app(service: LLMService | None = None) -> FastAPI:
 
     application = FastAPI(title="EL Voice LLM Service", docs_url=None, redoc_url=None, lifespan=lifespan)
 
+    @application.exception_handler(RequestValidationError)
+    async def invalid_request(_request, _error):
+        # Pydantic's default error includes the rejected input (possibly base64).
+        return JSONResponse({"detail": "Invalid text or image input"}, status_code=422)
+
     @application.get("/healthz")
     async def healthz():
         current: LLMService | None = getattr(application.state, "service", service)
@@ -154,6 +169,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
         if trace_id != turn_id:
             raise HTTPException(400, "trace_id must match the turn_id in the request path")
         current = require_service()
+        if request.image is not None and current.mode != "remote":
+            raise HTTPException(400, "Images require Remote Voice")
         try:
             state = current.contexts.get(session_id)
         except OverflowError as exc:
@@ -167,7 +184,9 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                 state.active_turn_id = turn_id
                 state.cancel_event = cancelled
                 log_structured(logger, "llm_turn_started", session_id=session_id,
-                               turn_id=turn_id, trace_id=trace_id, mode=current.mode)
+                               turn_id=turn_id, trace_id=trace_id, mode=current.mode,
+                               text=request.text,
+                               image=image_metadata(request.image) if request.image else None)
                 queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=12)
                 producer_finished = asyncio.Event()
                 reply_parts: list[str] = []
@@ -181,6 +200,8 @@ def create_app(service: LLMService | None = None) -> FastAPI:
                         provider_options = {"session_id": session_id, "turn_id": trace_id}
                         if current.mode == "remote" and request.search_enabled:
                             provider_options["search_enabled"] = True
+                        if request.image is not None:
+                            provider_options["image"] = request.image
                         provider_stream = current.provider.stream(
                             request.text, history, cancelled, **provider_options,
                         )

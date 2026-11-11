@@ -5,3 +5,5 @@
 - [ ] [Replace regex search routing with LLM-driven tool calling](SPEC-003-LLM-DRIVEN-TOOL-CALLING.md).
 - [ ] [Add an opt-in Remote Voice web-search control](SPEC-004-REMOTE-WEB-SEARCH-TOGGLE.md).
 - [ ] [Add local target-speaker gating with voice enrollment](SPEC-005-LOCAL-TARGET-SPEAKER-GATING.md).
+- [ ] [Reduce voice CPU during idle listening and inference](SPEC-006-REDUCE-VOICE-CPU.md).
+- [x] [Add clipboard screenshots and typed questions](SPEC-007-CLIPBOARD-IMAGE-AND-TEXT-INPUT.md).

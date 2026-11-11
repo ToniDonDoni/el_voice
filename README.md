@@ -2,9 +2,37 @@
 
 An independent Dota voice assistant for Docker Desktop on Apple Silicon. The browser captures microphone audio and plays responses; Linux ARM64 CPU containers run streaming VAD, Whisper transcription, LLM response generation, and Silero `b_lez` speech synthesis. Choose Local Voice for offline Gemma inference or Remote Voice for OpenCode Go and web search. No code or binary artifacts from the referenced assistant project are used.
 
+## Typed questions and clipboard screenshots
+
+Use the question field and **Send** (or Enter; Shift+Enter adds a line) to ask a
+question without microphone access. Text and voice share the same conversation;
+**Start talking** enables the microphone. A typed Send interrupts the active reply.
+
+In Remote Voice, copy a screenshot and click **Paste image**, or paste it directly
+into the question field with Cmd+V / Ctrl+V. A preview confirms the attachment;
+**Remove image** clears it. Type a question and Send, or speak the next question.
+Send with only an image asks for a description. The image is consumed by one
+nonempty question and is cleared from the composer afterward. Empty speech
+recognition keeps it. Clear chat, End session, and disconnect clear pending images.
+
+Clipboard images are converted to PNG with a maximum side of 2048 pixels and a
+4 MiB upload limit. Only Remote Voice accepts them. The remote LLM service sends
+text and the image together to the configured DeepSeek model via OpenCode Go;
+no separate OCR service is used. Images are available for the current answer,
+including its tool/final-answer steps, but subsequent conversation history keeps
+only the question and answer text. Re-paste a screenshot to inspect it again.
+The browser and services hold images in memory and do not save them to disk.
+
+Logs include the submitted text and image metadata (attachment ID, dimensions,
+byte size, SHA-256). Match `clipboard_image_received`, `user_transcript`,
+`llm_turn_started`, and `provider_request_started` to confirm the image reached
+both services and the actual provider request. Provider requests report
+`image_count` and `images`; image bytes/base64 are never logged. A provider HTTP
+response and completed model answer establish successful remote processing.
+
 ## Choose a voice mode
 
-Both modes use the same browser, local microphone capture, Whisper STT, and Silero TTS. Local mode runs Gemma in the internal LLM service and needs no provider key or internet access at runtime. Remote mode sends recognized text, bounded conversation context, and search queries/results to OpenCode Go and DuckDuckGo; microphone audio and speech synthesis stay local. The provider key is passed only to the Remote LLM service. Its health check confirms configuration, not successful live inference.
+Both modes use the same browser, local microphone capture, Whisper STT, and Silero TTS. Local mode runs Gemma in the internal LLM service and needs no provider key or internet access at runtime. Remote mode sends typed or recognized text, explicitly pasted screenshots, bounded text conversation context, and search queries/results to OpenCode Go and DuckDuckGo; microphone audio and speech synthesis stay local. The provider key is passed only to the Remote LLM service. Its health check confirms configuration, not successful live inference.
 
 Prepare the required voice models for either mode. Run `sh tools/init.sh` first. Remote Voice deliberately downloads only Whisper and Silero, so this preparation does not need a provider key or the Gemma model. Add your real `OPENCODE_GO_API_KEY` to the ignored local `.env` file before starting Remote Voice; do not put it in a shell command or commit it.
 
